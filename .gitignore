@@ -1,0 +1,68 @@
+# ビルド成果物
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# 実行ファイル（バイナリ）
+**/bin/
+compare_memory
+enumerate_3x3
+enumerate_real_3x3
+estimate_memory
+test_lr_schedule
+visualize_patterns
+visualize_rotations
+
+# 学習済みモデル・データファイル
+*.bin
+*.bin.*
+ntuple_*.bin*
+*.dat
+*.model
+*.weights
+
+# CMake関連
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# IDE/エディタ設定
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ImGui設定
+imgui.ini
+
+# テスト出力
+test.txt
+*.log
+
+# 依存関係（外部ライブラリ）
+_deps/
+
+# バックアップファイル
+*.bak
+*.bak2
+*.backup
+
+# コンパイル済みPythonファイル（もしあれば）
+__pycache__/
+*.pyc
+*.pyo
+
+# その他の一時ファイル
+*.tmp
+*.temp
+.cache/

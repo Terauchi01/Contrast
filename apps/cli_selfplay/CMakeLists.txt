@@ -1,0 +1,2 @@
+add_executable(cli_selfplay main.cpp)
+target_link_libraries(cli_selfplay PRIVATE contrast_core contrast_engine)

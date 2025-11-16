@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Contrast Game</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .board-container {
+            flex: 1;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .controls {
+            width: 300px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .board {
+            display: grid;
+            grid-template-columns: repeat(9, 50px);
+            grid-template-rows: repeat(9, 50px);
+            gap: 2px;
+            margin: 20px auto;
+            width: fit-content;
+        }
+        .cell {
+            width: 50px;
+            height: 50px;
+            border: 1px solid #ccc;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            position: relative;
+            background: #fff;
+        }
+        .cell:hover {
+            background: #f0f0f0;
+        }
+        .cell.selected {
+            background: #ffffcc;
+            border: 2px solid #ffaa00;
+        }
+        .piece {
+            width: 35px;
+            height: 35px;
+            border-radius: 50%;
+            clip-path: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);
+        }
+        .piece.black {
+            background: #333;
+        }
+        .piece.white {
+            background: #eee;
+            border: 2px solid #999;
+        }
+        .tile {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            opacity: 0.3;
+        }
+        .tile.black {
+            background: radial-gradient(circle, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.2) 100%);
+        }
+        .tile.gray {
+            background: radial-gradient(circle, rgba(128,128,128,0.4) 0%, rgba(128,128,128,0.2) 100%);
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            margin: 5px 0;
+            border: none;
+            border-radius: 4px;
+            background: #007bff;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            text-align: center;
+            font-size: 18px;
+            font-weight: bold;
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .status.in-progress {
+            background: #e3f2fd;
+            color: #1976d2;
+        }
+        .status.black-wins {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+        .status.white-wins {
+            background: #fff3e0;
+            color: #e65100;
+        }
+        select {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        .info {
+            margin: 10px 0;
+            padding: 10px;
+            background: #f9f9f9;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Contrast Game - オンライン対戦</h1>
+    
+    <div class="container">
+        <div class="board-container">
+            <div class="status" id="status">ゲームを開始してください</div>
+            <div class="board" id="board"></div>
+        </div>
+        
+        <div class="controls">
+            <h3>新しいゲーム</h3>
+            <div>
+                <label>白プレイヤー:</label>
+                <select id="white-player">
+                    <option value="human">人間</option>
+                    <option value="greedy">Greedy AI</option>
+                    <option value="rulebased">RuleBased AI</option>
+                </select>
+            </div>
+            <div>
+                <label>黒プレイヤー:</label>
+                <select id="black-player">
+                    <option value="human">人間</option>
+                    <option value="greedy">Greedy AI</option>
+                    <option value="rulebased">RuleBased AI</option>
+                </select>
+            </div>
+            <button onclick="newGame()">ゲーム開始</button>
+            <button onclick="resetGame()">リセット</button>
+            
+            <div class="info" id="info">
+                <strong>遊び方:</strong><br>
+                1. 自分の駒をクリック<br>
+                2. 移動先をクリック<br>
+                3. タイルの種類を選択<br>
+                4. タイルの配置場所をクリック
+            </div>
+            
+            <div class="info">
+                <strong>現在のプレイヤー:</strong><br>
+                <span id="current-player">-</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let sessionId = null;
+        let gameState = null;
+        let selectedPiece = null;
+        let selectedDest = null;
+        let selectedTile = null;
+
+        const API_BASE = 'http://localhost:8080/api';
+
+        async function newGame() {
+            const whiteAI = document.getElementById('white-player').value;
+            const blackAI = document.getElementById('black-player').value;
+            
+            const response = await fetch(`${API_BASE}/game/new`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    white_ai: whiteAI,
+                    black_ai: blackAI
+                })
+            });
+            
+            const data = await response.json();
+            sessionId = data.session_id;
+            await updateGameState();
+            
+            // AIのターンなら自動実行
+            if (gameState.ai[gameState.current_player] !== 'human') {
+                setTimeout(makeAIMove, 500);
+            }
+        }
+
+        async function updateGameState() {
+            if (!sessionId) return;
+            
+            const response = await fetch(`${API_BASE}/game/${sessionId}`);
+            gameState = await response.json();
+            renderBoard();
+            updateStatus();
+        }
+
+        async function makeAIMove() {
+            if (!sessionId) return;
+            
+            const response = await fetch(`${API_BASE}/game/${sessionId}/ai_move`);
+            gameState = await response.json();
+            renderBoard();
+            updateStatus();
+            
+            // 次もAIのターンなら続行
+            if (gameState.status === 'in_progress' && 
+                gameState.ai[gameState.current_player] !== 'human') {
+                setTimeout(makeAIMove, 500);
+            }
+        }
+
+        async function makeMove(sx, sy, dx, dy, tile, tx, ty) {
+            const response = await fetch(`${API_BASE}/game/${sessionId}/move`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sx, sy, dx, dy,
+                    tile: tile || 'none',
+                    tile_x: tx || 0,
+                    tile_y: ty || 0
+                })
+            });
+            
+            if (response.ok) {
+                gameState = await response.json();
+                renderBoard();
+                updateStatus();
+                
+                // AIのターンなら自動実行
+                if (gameState.status === 'in_progress' && 
+                    gameState.ai[gameState.current_player] !== 'human') {
+                    setTimeout(makeAIMove, 500);
+                }
+            }
+        }
+
+        async function resetGame() {
+            if (!sessionId) return;
+            
+            await fetch(`${API_BASE}/game/${sessionId}/reset`, {
+                method: 'POST'
+            });
+            
+            await updateGameState();
+        }
+
+        function renderBoard() {
+            const board = document.getElementById('board');
+            board.innerHTML = '';
+            
+            for (let y = 0; y < 9; y++) {
+                for (let x = 0; x < 9; x++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'cell';
+                    cell.dataset.x = x;
+                    cell.dataset.y = y;
+                    
+                    // Render tile
+                    const tile = gameState.board.tiles.find(t => t.x === x && t.y === y);
+                    if (tile) {
+                        const tileDiv = document.createElement('div');
+                        tileDiv.className = `tile ${tile.type}`;
+                        cell.appendChild(tileDiv);
+                    }
+                    
+                    // Render piece
+                    const piece = gameState.board.pieces.find(p => p.x === x && p.y === y);
+                    if (piece) {
+                        const pieceDiv = document.createElement('div');
+                        pieceDiv.className = `piece ${piece.color}`;
+                        cell.appendChild(pieceDiv);
+                    }
+                    
+                    cell.onclick = () => handleCellClick(x, y);
+                    board.appendChild(cell);
+                }
+            }
+        }
+
+        function handleCellClick(x, y) {
+            // TODO: Implement move selection logic
+            console.log(`Clicked cell: ${x}, ${y}`);
+        }
+
+        function updateStatus() {
+            const statusDiv = document.getElementById('status');
+            const currentPlayerDiv = document.getElementById('current-player');
+            
+            if (gameState.status === 'black_wins') {
+                statusDiv.textContent = '黒の勝利！';
+                statusDiv.className = 'status black-wins';
+            } else if (gameState.status === 'white_wins') {
+                statusDiv.textContent = '白の勝利！';
+                statusDiv.className = 'status white-wins';
+            } else {
+                statusDiv.textContent = 'ゲーム進行中';
+                statusDiv.className = 'status in-progress';
+            }
+            
+            currentPlayerDiv.textContent = gameState.current_player === 'black' ? '黒' : '白';
+        }
+    </script>
+</body>
+</html>
