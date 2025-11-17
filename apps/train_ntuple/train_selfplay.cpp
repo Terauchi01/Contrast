@@ -6,6 +6,7 @@
 #include <random>
 #include <chrono>
 #include <iomanip>
+#include <ctime>
 #include <deque>
 #include <algorithm>
 #include <thread>
@@ -13,6 +14,9 @@
 #include <condition_variable>
 #include <atomic>
 #include <queue>
+#include <memory>
+#include <cstdlib>
+#include <filesystem>
 
 using namespace contrast;
 using namespace contrast_ai;
@@ -32,6 +36,7 @@ struct TrainingConfig {
     int num_worker_threads = 7;
     std::string save_path = "ntuple_selfplay.bin";
     std::string load_path = "";
+    bool log_role_swap = true;              // ロール入れ替え時のログ出力を行うか
 };
 
 /**
@@ -221,12 +226,15 @@ GameResult play_selfplay_game_shared(
     const NTupleNetwork& opponent,
     bool learner_is_black,
     float learner_epsilon,
-    std::mt19937& rng
+    std::mt19937& rng,
+    Player start_player
 ) {
     GameResult result;
     result.learner_was_black = learner_is_black;
     GameState state;
     state.reset();
+    // Set starting player based on requested start_player (parity control)
+    state.to_move_ = start_player;
     
     const int MAX_MOVES = 500;
     int move_count = 0;
@@ -288,12 +296,15 @@ GameResult play_selfplay_game(
     const NTupleNetwork& opponent,
     bool learner_is_black,
     float learner_epsilon,
-    std::mt19937& rng
+    std::mt19937& rng,
+    Player start_player
 ) {
     GameResult result;
     result.learner_was_black = learner_is_black;
     GameState state;
     state.reset();
+    // Set starting player based on requested start_player (parity control)
+    state.to_move_ = start_player;
     
     const int MAX_MOVES = 500;
     int move_count = 0;
@@ -350,7 +361,7 @@ GameResult play_selfplay_game(
 void worker_thread(
     int worker_id,
     const SharedNTupleNetwork& learner_network,
-    std::atomic<NTupleNetwork*>& opponent_network_ptr,
+    std::shared_ptr<NTupleNetwork>& opponent_network_ptr,
     std::atomic<bool>& learner_is_black,
     GameResultQueue& result_queue,
     std::atomic<int>& games_completed,
@@ -367,12 +378,16 @@ void worker_thread(
             break;
         }
         
-        // 現在の対戦相手とlearner色を取得
-        NTupleNetwork* opponent_ptr = opponent_network_ptr.load();
-        bool is_black = learner_is_black.load();
+    // 現在の対戦相手とlearner色を取得
+    // atomic_load により shared_ptr を安全に取得
+    std::shared_ptr<NTupleNetwork> opponent_ptr = std::atomic_load(&opponent_network_ptr);
+    bool is_black = learner_is_black.load();
+    // Determine starting player by game parity: odd -> White first, even -> Black first
+    int game_no = game_num + 1; // make 1-based
+    Player start_player = (game_no % 2 == 1) ? Player::White : Player::Black;
         
-        // ゲームプレイ（learner_networkは読み取り専用でSharedから直接評価）
-        GameResult result = play_selfplay_game_shared(learner_network, *opponent_ptr, is_black, learner_epsilon, rng);
+    // ゲームプレイ（learner_networkは読み取り専用でSharedから直接評価）
+    GameResult result = play_selfplay_game_shared(learner_network, *opponent_ptr, is_black, learner_epsilon, rng, start_player);
         
         result_queue.push(std::move(result));
     }
@@ -385,7 +400,7 @@ void worker_thread(
  */
 void updater_thread(
     SharedNTupleNetwork& learner_network,
-    std::atomic<NTupleNetwork*>& opponent_network_ptr,
+    std::shared_ptr<NTupleNetwork>& opponent_network_ptr,
     std::atomic<bool>& learner_is_black,
     GameResultQueue& result_queue,
     std::atomic<int>& games_processed,
@@ -404,8 +419,8 @@ void updater_thread(
     int recent_learner_wins = 0;
     
     // 対戦相手ネットワーク（最初は学習者のコピー）
-    NTupleNetwork opponent = learner_network.copy();
-    opponent_network_ptr.store(&opponent);
+    auto initial_opponent = std::make_shared<NTupleNetwork>(learner_network.copy());
+    std::atomic_store(&opponent_network_ptr, initial_opponent);
     
     auto start_time = std::chrono::steady_clock::now();
     int last_swap_game = 0;
@@ -501,8 +516,10 @@ void updater_thread(
             if (current_game - last_swap_game >= config.swap_interval) {
                 learner_is_black.store(!learner_is_black.load());
                 last_swap_game = current_game;
-                std::cout << "[System] Swapped roles - Learner is now " 
-                          << (learner_is_black.load() ? "Black" : "White") << std::endl;
+                    if (config.log_role_swap) {
+                        std::cout << "[System] Swapped roles - Learner is now " 
+                                  << (learner_is_black.load() ? "Black" : "White") << std::endl;
+                    }
             }
             
             // 対戦相手の昇格チェック
@@ -512,14 +529,29 @@ void updater_thread(
                 float recent_rate = static_cast<float>(recent_learner_wins) / recent_wins.size();
                 
                 if (recent_rate >= config.promotion_threshold) {
-                    // 対戦相手を現在の学習者に置き換え
-                    opponent = learner_network.copy();
-                    std::cout << "[System] *** OPPONENT PROMOTED! ***" << std::endl;
+                    // 対戦相手を現在の学習者に置き換える
+                    auto new_opponent = std::make_shared<NTupleNetwork>(learner_network.copy());
+                    // 古い対戦相手を取得してから差し替え
+                    auto prev_opponent = std::atomic_load(&opponent_network_ptr);
+                    std::atomic_store(&opponent_network_ptr, new_opponent);
+
+                    // タイムスタンプを取得
+                    auto now = std::chrono::system_clock::now();
+                    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+                    char timebuf[64];
+                    if (std::strftime(timebuf, sizeof(timebuf), "%F %T", std::localtime(&now_c))) {
+                        std::cout << "[System] [" << timebuf << "] ";
+                    }
+
+                    // 詳細ログ出力（ゲーム番号、勝率、閾値、旧/新ポインタ）
+                    std::cout << "*** OPPONENT PROMOTED at game " << current_game << " ***" << std::endl;
                     std::cout << "[System]     Recent win rate: " << std::setprecision(1) << std::fixed 
                               << (recent_rate * 100.0f) << "% (threshold: " 
                               << (config.promotion_threshold * 100.0f) << "%)" << std::endl;
+                    std::cout << "[System]     Previous opponent ptr: " << prev_opponent.get()
+                              << "  -> New opponent ptr: " << new_opponent.get() << std::endl;
                     std::cout << "[System]     Opponent updated to current learner" << std::endl;
-                    
+
                     // 統計リセット
                     recent_wins.clear();
                     recent_learner_wins = 0;
@@ -530,9 +562,34 @@ void updater_thread(
         
         // チェックポイント保存
         if (current_game % config.save_interval == 0) {
-            std::string checkpoint_path = config.save_path + "." + std::to_string(current_game);
-            learner_network.save(checkpoint_path);
-            std::cout << "[Updater] Saved checkpoint: " << checkpoint_path << std::endl;
+            // 保存先ディレクトリの決定: 環境変数 TRAIN_SAVE_DIR があればそれを優先
+            std::filesystem::path save_dir;
+            if (const char* env_p = std::getenv("TRAIN_SAVE_DIR")) {
+                save_dir = std::string(env_p);
+            } else {
+                // config.save_path にディレクトリが含まれていればそれを使い、含まれていなければデフォルトの bin ディレクトリを使う
+                std::filesystem::path configured_path(config.save_path);
+                if (!configured_path.has_parent_path() || configured_path.parent_path().string().empty()) {
+                    save_dir = std::filesystem::path("/home/matsu-lab/terauchi/Contrast/bin");
+                } else {
+                    save_dir = configured_path.parent_path();
+                }
+            }
+
+            // ディレクトリ存在を保証
+            std::error_code ec;
+            std::filesystem::create_directories(save_dir, ec);
+            if (ec) {
+                std::cerr << "[Updater] Warning: failed to create save directory: " << save_dir << " -> " << ec.message() << std::endl;
+            }
+
+            // ファイル名を組み立て
+            std::string base_name = std::filesystem::path(config.save_path).filename().string();
+            std::string checkpoint_name = base_name + "." + std::to_string(current_game);
+            std::filesystem::path checkpoint_path = save_dir / checkpoint_name;
+
+            learner_network.save(checkpoint_path.string());
+            std::cout << "[Updater] Saved checkpoint: " << checkpoint_path.string() << std::endl;
         }
     }
     
@@ -587,9 +644,10 @@ void train_network_selfplay(const TrainingConfig& config) {
     std::atomic<int> games_completed(0);
     std::atomic<int> games_processed(0);
     std::atomic<bool> learner_is_black(true);
-    
-    // 対戦相手ネットワークのポインタ（updaterスレッドで管理）
-    std::atomic<NTupleNetwork*> opponent_network_ptr(nullptr);
+
+    // 対戦相手ネットワークの共有ポインタ（updaterスレッドで管理）
+    // std::atomic_load / std::atomic_store を使って安全に公開する
+    std::shared_ptr<NTupleNetwork> opponent_network_ptr;
     
     auto start_time = std::chrono::steady_clock::now();
     
@@ -600,7 +658,7 @@ void train_network_selfplay(const TrainingConfig& config) {
                         config.num_games, std::cref(config));
     
     // 対戦相手が初期化されるまで待つ
-    while (opponent_network_ptr.load() == nullptr) {
+    while (std::atomic_load(&opponent_network_ptr) == nullptr) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     
@@ -655,6 +713,8 @@ int main(int argc, char* argv[]) {
             config.evaluation_window = std::stoi(argv[++i]);
         } else if (arg == "--promotion-threshold" && i + 1 < argc) {
             config.promotion_threshold = std::stof(argv[++i]);
+        } else if (arg == "--no-swap-log") {
+            config.log_role_swap = false;
         } else if (arg == "--save-interval" && i + 1 < argc) {
             config.save_interval = std::stoi(argv[++i]);
         } else if (arg == "--output" && i + 1 < argc) {
@@ -672,6 +732,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  --eval-window N          Evaluation window size (default: 1000)\n";
             std::cout << "  --promotion-threshold T  Win rate threshold for promotion (default: 0.55)\n";
             std::cout << "  --save-interval N        Save checkpoint every N games (default: 10000)\n";
+            std::cout << "  --no-swap-log            Disable 'Swapped roles' log messages\n";
             std::cout << "  --output PATH            Output file path (default: ntuple_selfplay.bin)\n";
             std::cout << "  --load PATH              Load existing weights before training\n";
             std::cout << "  --help                   Show this help message\n";

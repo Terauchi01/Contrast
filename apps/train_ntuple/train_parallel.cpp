@@ -15,6 +15,8 @@
 #include <condition_variable>
 #include <atomic>
 #include <queue>
+#include <fstream>
+#include <cstdlib>
 
 using namespace contrast;
 using namespace contrast_ai;
@@ -571,6 +573,35 @@ int main(int argc, char* argv[]) {
         }
     }
     
+    // Determine output directory: prefer environment variable TRAIN_OUTPUT_DIR,
+    // otherwise default to /home/matsu-lab/terauchi (HDD directory requested by user).
+    const char* env_out = std::getenv("TRAIN_OUTPUT_DIR");
+    std::string default_dir = "/home/matsu-lab/terauchi";
+    std::string out_dir = env_out ? std::string(env_out) : default_dir;
+
+    // If user didn't provide --output, set default save path under out_dir
+    if (config.save_path.empty() || config.save_path == "ntuple_weights.bin") {
+        config.save_path = out_dir + "/ntuple_weights.bin";
+    }
+
+    // Setup log file: prefer TRAIN_LOG_DIR, else use the same out_dir
+    const char* env_log = std::getenv("TRAIN_LOG_DIR");
+    std::string log_dir = env_log ? std::string(env_log) : out_dir;
+    std::string log_path = log_dir + "/train_parallel.log";
+
+    static std::ofstream log_stream;
+    log_stream.open(log_path, std::ios::out | std::ios::app);
+    if (log_stream) {
+        // Inform user on stdout before redirecting (so it appears in terminal)
+        std::cout << "Redirecting logs to: " << log_path << "\n";
+        std::cout.flush();
+        // Redirect cout/cerr to log file so runtime logs are saved
+        std::cout.rdbuf(log_stream.rdbuf());
+        std::cerr.rdbuf(log_stream.rdbuf());
+    } else {
+        std::cerr << "Warning: failed to open log file: " << log_path << "\n";
+    }
+
     train_network_parallel(config);
     return 0;
 }
