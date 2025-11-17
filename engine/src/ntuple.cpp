@@ -38,54 +38,25 @@ int NTuple::encode_cell(const contrast::Cell& c) {
 }
 
 /**
- * タイル残数を0-7にエンコード
- * 
- * エンコード方式: 黒タイル + 灰色タイル × 4
- * 
- * 例:
- *   - 黒3枚、灰1枚（初期状態） → 3 + 1×4 = 7
- *   - 黒2枚、灰1枚 → 2 + 1×4 = 6
- *   - 黒3枚、灰0枚 → 3 + 0×4 = 3
- *   - 黒0枚、灰0枚（使い切り） → 0 + 0×4 = 0
- * 
- * @param black_tiles 黒タイル残数 (0-3)
- * @param gray_tiles 灰色タイル残数 (0-1)
- * @return エンコードされた値 (0-7)
- */
-int NTuple::encode_tile_inventory(int black_tiles, int gray_tiles) {
-  return black_tiles + gray_tiles * 4;
-}
-
-/**
- * パターンの完全なゲーム状態を一意のインデックスに変換
- * 
- * v2.0拡張: 盤面パターン + タイル残数情報
+ * パターンの盤面状態を一意のインデックスに変換
  * 
  * インデックス計算式:
- *   idx = board_pattern_idx × 64 + tile_idx
- *   
- * tile_idxの構成:
- *   - 黒プレイヤーのタイル情報: 0-7 (8通り)
- *   - 白プレイヤーのタイル情報: 0-7 (8通り)
- *   - 組み合わせ: black_tile_idx × 8 + white_tile_idx
+ *   idx = Σ(cell_value × 9^position)
  * 
  * 仕組み：
  *   - パターン内の各セルを9進数の「桁」として扱う
  *   - 左から順に処理し、base=9で桁上げしながら結合
- *   - 最後にタイル情報（64通り）を追加
  * 
- * メモリ使用量の見積もり（v2.0）：
- *   - 3x3（9セル）: 9^9 × 64 = 24,794,911,296 状態 → 約92GB (float)
- *   - 2x2（4セル）: 9^4 × 64 = 419,904 状態 → 約1.6MB (float)
- *   - 推奨: より小さなパターンを複数使用
+ * メモリ使用量の見積もり：
+ *   - 3x3（9セル）: 9^9 = 387,420,489 状態 → 約1.4GB (float)
+ *   - 2x2（4セル）: 9^4 = 6,561 状態 → 約26KB (float)
  * 
- * @param state 評価するゲーム状態（盤面+タイル残数）
+ * @param board 評価する盤面
  * @param offset_x パターンのX方向オフセット
  * @param offset_y パターンのY方向オフセット
  * @return パターン状態を表す一意のインデックス（0 ～ num_states()-1）
  */
-long long NTuple::to_index(const contrast::GameState& state, int offset_x, int offset_y) const {
-  const contrast::Board& b = state.board();
+long long NTuple::to_index(const contrast::Board& board, int offset_x, int offset_y) const {
   long long idx = 0;
   constexpr int base = 9; // 9 possible states per cell
   
@@ -98,23 +69,12 @@ long long NTuple::to_index(const contrast::GameState& state, int offset_x, int o
     int y = offset_y + dy;
     
     // Out of bounds = treat as empty
-    if (x < 0 || x >= b.width() || y < 0 || y >= b.height()) {
+    if (x < 0 || x >= board.width() || y < 0 || y >= board.height()) {
       idx = idx * base + 0;
     } else {
-      idx = idx * base + encode_cell(b.at(x, y));
+      idx = idx * base + encode_cell(board.at(x, y));
     }
   }
-  
-  // Encode tile inventory (2 slots: black player, white player)
-  // Each slot: 0-7 (black_tiles + gray_tiles*4)
-  const contrast::TileInventory& black_inv = state.inventory(contrast::Player::Black);
-  const contrast::TileInventory& white_inv = state.inventory(contrast::Player::White);
-  
-  int black_tile_idx = encode_tile_inventory(black_inv.black, black_inv.gray);
-  int white_tile_idx = encode_tile_inventory(white_inv.black, white_inv.gray);
-  
-  // Combine: board_pattern × 64 + (black_tile_idx × 8 + white_tile_idx)
-  idx = idx * 64 + (black_tile_idx * 8 + white_tile_idx);
   
   return idx;
 }
@@ -122,17 +82,13 @@ long long NTuple::to_index(const contrast::GameState& state, int offset_x, int o
 /**
  * このパターンが取りうる状態の総数を計算
  * 
- * v2.0拡張: 盤面パターン × タイル情報
- * 
  * 重みテーブルのサイズを決定するために使用
  * 各セルが9通り → Nセルなら 9^N 通り
- * タイル情報が 8×8 = 64通り
- * 合計: 9^N × 64
  * 
- * メモリ使用量の見積もり（v2.0）：
- *   - 3x3（9セル）: 9^9 × 64 = 24,794,911,296 状態 → 約92GB (float)
- *   - 2x2（4セル）: 9^4 × 64 = 419,904 状態 → 約1.6MB (float)
- *   - 2x3（6セル）: 9^6 × 64 = 33,849,984 状態 → 約129MB (float)
+ * メモリ使用量の見積もり：
+ *   - 3x3（9セル）: 9^9 = 387,420,489 状態 → 約1.4GB (float)
+ *   - 2x2（4セル）: 9^4 = 6,561 状態 → 約26KB (float)
+ *   - 2x3（6セル）: 9^6 = 531,441 状態 → 約2MB (float)
  *   - 推奨: 2x2や2x3など小さめのパターンを複数組み合わせる
  * 
  * @return 状態の総数
@@ -142,8 +98,6 @@ long long NTuple::num_states() const {
   for (size_t i = 0; i < num_cells; ++i) {
     result *= 9LL;
   }
-  // Multiply by tile inventory combinations (8 × 8 = 64)
-  result *= 64LL;
   return result;
 }
 
@@ -259,22 +213,19 @@ void NTupleNetwork::init_tuples() {
 /**
  * 盤面状態から特徴インデックスを抽出（内部用）
  * 
- * v2.0: タイル情報を含む完全な状態をエンコード
- * 
- * 各パターンについて、現在の盤面状態+タイル残数をインデックスに変換
+ * 各パターンについて、現在の盤面状態をインデックスに変換
  * これらのインデックスが重みテーブルへのアクセスキーとなる
  * 
- * @param state 評価する局面（盤面+タイル情報）
+ * @param board 評価する盤面
  * @return 各パターンのインデックスのリスト
  */
-std::vector<int> NTupleNetwork::extract_features(const contrast::GameState& state) const {
+std::vector<int> NTupleNetwork::extract_features(const contrast::Board& board) const {
   std::vector<int> features;
   features.reserve(tuples_.size());
   
   // Each tuple evaluated at its base position
-  // Now includes tile inventory information
   for (const auto& tuple : tuples_) {
-    int idx = tuple.to_index(state, 0, 0);
+    int idx = tuple.to_index(board, 0, 0);
     features.push_back(idx);
   }
   
@@ -284,8 +235,6 @@ std::vector<int> NTupleNetwork::extract_features(const contrast::GameState& stat
 /**
  * 盤面を評価して価値を返す（メイン評価関数）
  * 
- * v2.0拡張: タイル残数を考慮した評価
- * 
  * N-tupleネットワークの推論プロセス：
  * 
  * 1. 対称性の正規化
@@ -293,23 +242,19 @@ std::vector<int> NTupleNetwork::extract_features(const contrast::GameState& stat
  *    - 8種類の対称性（回転・反転）から代表形を選択
  *    - 例：盤面を180度回転しても本質的には同じ → 1つの形に統一
  * 
- * 2. 完全な状態のエンコード（v2.0）
- *    - 盤面パターン + タイル残数情報
- *    - 終盤でタイルが少ない状況を正しく評価可能
- * 
- * 3. パターンマッチング
- *    - 各パターン（現在は3x3のみ）について、正規化された盤面+タイル情報から
+ * 2. パターンマッチング
+ *    - 各パターンについて、正規化された盤面から
  *      インデックスを計算し、対応する重みを取得
  * 
- * 4. 価値の合算
+ * 3. 価値の合算
  *    - 全パターンの重みを足し合わせる
  *    - 線形結合：value = Σ weights[pattern_i][index_i]
  * 
- * 5. 手番の考慮
+ * 4. 手番の考慮
  *    - 重みは常に黒番視点で学習
  *    - 白番の場合は符号を反転（白にとって良い = 黒にとって悪い）
  * 
- * @param state 評価する局面（盤面+タイル情報）
+ * @param state 評価する局面
  * @return 評価値（正=現在のプレイヤーに有利、負=不利）
  */
 float NTupleNetwork::evaluate(const contrast::GameState& state) const {
@@ -318,18 +263,14 @@ float NTupleNetwork::evaluate(const contrast::GameState& state) const {
   auto canonical_sym = contrast::SymmetryOps::get_canonical_symmetry(b);
   auto canonical_board = contrast::SymmetryOps::transform_board(b, canonical_sym);
   
-  // Create canonical state with transformed board but same tile inventory
-  contrast::GameState canonical_state = state;
-  canonical_state.board() = canonical_board;
-  
   float value = 0.0f;
   
-  // 全パターンの重みを足し合わせる（タイル情報を含む）
+  // 全パターンの重みを足し合わせる
   for (size_t i = 0; i < tuples_.size(); ++i) {
     const auto& tuple = tuples_[i];
     const auto& weights = weights_[i];
     
-    int idx = tuple.to_index(canonical_state, 0, 0);
+    int idx = tuple.to_index(canonical_board, 0, 0);
     value += weights[idx];
   }
   
@@ -344,15 +285,13 @@ float NTupleNetwork::evaluate(const contrast::GameState& state) const {
 /**
  * TD学習で重みを更新（学習のコア）
  * 
- * v2.0拡張: タイル情報を含む完全な状態で学習
- * 
  * Temporal Difference (TD) Learning の実装
  * 強化学習の一種で、時系列データから価値を学習する手法
  * 
  * 学習プロセス：
  * 
  * 1. 現在の評価値を計算
- *    - 正規化された盤面+タイル情報から、現在のネットワークが予測する価値を取得
+ *    - 正規化された盤面から、現在のネットワークが予測する価値を取得
  * 
  * 2. 誤差の計算
  *    - error = target - current_value
@@ -376,7 +315,7 @@ float NTupleNetwork::evaluate(const contrast::GameState& state) const {
  *   - ゲーム終了時は最終結果（勝敗）で学習
  *   - モンテカルロ法より効率的（全ゲーム終了を待たない）
  * 
- * @param state 更新対象の局面（盤面+タイル情報）
+ * @param state 更新対象の局面
  * @param target 教師信号（目標となる評価値）
  * @param learning_rate 学習率（更新の大きさを制御、通常0.001-0.01）
  */
@@ -386,17 +325,13 @@ void NTupleNetwork::td_update(const contrast::GameState& state, float target, fl
   auto canonical_sym = contrast::SymmetryOps::get_canonical_symmetry(b);
   auto canonical_board = contrast::SymmetryOps::transform_board(b, canonical_sym);
   
-  // Create canonical state with transformed board but same tile inventory
-  contrast::GameState canonical_state = state;
-  canonical_state.board() = canonical_board;
-  
   // Get current value in raw form (before perspective flip)
   float raw_value = 0.0f;
   for (size_t i = 0; i < tuples_.size(); ++i) {
     const auto& tuple = tuples_[i];
     const auto& weights = weights_[i];
     
-    int idx = tuple.to_index(canonical_state, 0, 0);
+    int idx = tuple.to_index(canonical_board, 0, 0);
     raw_value += weights[idx];
   }
   
@@ -416,12 +351,12 @@ void NTupleNetwork::td_update(const contrast::GameState& state, float target, fl
   // Normalize learning rate by number of tuples
   float normalized_lr = learning_rate / tuples_.size();
   
-  // Update all tuples (with tile inventory information)
+  // Update all tuples
   for (size_t i = 0; i < tuples_.size(); ++i) {
     const auto& tuple = tuples_[i];
     auto& weights = weights_[i];
     
-    int idx = tuple.to_index(canonical_state, 0, 0);
+    int idx = tuple.to_index(canonical_board, 0, 0);
     weights[idx] += normalized_lr * error;
   }
 }

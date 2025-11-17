@@ -8,4 +8,5 @@ add_subdirectory(test_rule_based)
 add_subdirectory(test_rulebased)
 add_subdirectory(debug_rulebased)
 add_subdirectory(ntuple_designer)
-add_subdirectory(web_server)
+# add_subdirectory(web_server)  # Temporarily disabled
+

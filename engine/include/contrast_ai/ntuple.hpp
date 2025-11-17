@@ -14,14 +14,9 @@ namespace contrast_ai {
  * N-tupleネットワークの基本単位となる局所パターン
  * 盤面の一部分（例：3x3の領域）の状態を表現
  * 
- * v2.0拡張: タイル残数情報を追加
- *   - 盤面パターン: 9^num_cells 通り
- *   - タイル情報: 8 × 8 = 64通り（黒プレイヤー×白プレイヤー）
- *   - 合計状態数: 9^num_cells × 64
- * 
  * 主な役割：
  *   - どのセルを見るか（cell_indices）を定義
- *   - 盤面状態 + タイル残数を一意のインデックスに変換
+ *   - 盤面状態を一意のインデックスに変換
  *   - 状態数の計算（メモリ見積もりに使用）
  */
 struct NTuple {
@@ -29,20 +24,16 @@ struct NTuple {
   std::array<int, MAX_CELLS> cell_indices; // パターン内のセル位置（線形化インデックス y*5+x）
   size_t num_cells = 0;                    // パターンに含まれるセルの実際の数
   
-  // 完全なゲーム状態（盤面+タイル残数）をこのパターンのインデックスに変換
+  // 盤面をこのパターンのインデックスに変換
   // offset: パターンを盤面上で移動させる場合のオフセット
-  long long to_index(const contrast::GameState& state, int offset_x, int offset_y) const;
+  long long to_index(const contrast::Board& board, int offset_x, int offset_y) const;
   
-  // このパターンが取りうる状態の総数を計算（9^num_cells × 8 × 8）
+  // このパターンが取りうる状態の総数を計算（9^num_cells）
   long long num_states() const;
   
   // 1セルの状態を0-8の整数にエンコード
   // (occupant, tile) → 単一の整数値
   static int encode_cell(const contrast::Cell& c);
-  
-  // タイル残数を0-7にエンコード（黒タイル+灰色タイル×4）
-  // 黒タイル(0-3) + 灰色タイル(0-1)×4 = 0-7
-  static int encode_tile_inventory(int black_tiles, int gray_tiles);
 };
 
 /**
@@ -51,13 +42,9 @@ struct NTuple {
  * N-tuple Networkは強化学習で盤面を評価するための関数近似器
  * 複数のパターン（N-tuple）を組み合わせて盤面全体の価値を推定
  * 
- * v2.0拡張: タイル残数を特徴量に追加
- *   - 各パターンがタイル情報を含む
- *   - 終盤戦略の改善に寄与
- * 
  * アーキテクチャ：
- *   - 入力：盤面状態（5x5, 各セル9通り）+ タイル残数（8×8通り）
- *   - 中間：複数のパターン（現在は3x3が1つ）
+ *   - 入力：盤面状態（5x5, 各セル9通り）
+ *   - 中間：複数のパターン（現在は3x3など）
  *   - 出力：評価値（スカラー、正=有利、負=不利）
  * 
  * 学習方法：
@@ -65,10 +52,9 @@ struct NTuple {
  *   - セルフプレイまたは対戦相手との対局から学習
  *   - 勝敗の結果で最終調整
  * 
- * メモリ使用量（v2.0）：
- *   - 3x3パターン×1個: 9^9 × 64 = 約92GB (float)
- *   - 注意: タイル情報追加でメモリ使用量が64倍に増加
- *   - より小さなパターン推奨（2x2など）
+ * メモリ使用量：
+ *   - 3x3パターン×1個: 9^9 = 約387百万状態 → 約1.4GB (float)
+ *   - 2x2パターン×1個: 9^4 = 約6,561状態 → 約26KB (float)
  */
 class NTupleNetwork {
 public:
@@ -104,7 +90,7 @@ private:
   void init_tuples();
   
   // 盤面から特徴インデックスを抽出（内部用）
-  std::vector<int> extract_features(const contrast::GameState& state) const;
+  std::vector<int> extract_features(const contrast::Board& board) const;
 };
 
 /**
