@@ -6,6 +6,7 @@
 #include "contrast_ai/random_policy.hpp"
 #include "contrast_ai/greedy_policy.hpp"
 #include "contrast_ai/ntuple.hpp"
+#include "contrast_ai/rule_based_policy2.hpp"
 #include <set>
 #include <string>
 #include <memory>
@@ -29,14 +30,16 @@ static bool ai_mode = false;
 static bool ai_running = false;
 static float ai_delay = 0.5f; // seconds between moves
 static float ai_timer = 0.0f;
-static int ai_black_type = 0; // 0=Random, 1=Greedy, 2=NTuple
+static int ai_black_type = 0; // 0=Random, 1=Greedy, 2=NTuple, 3=RuleBased2
 static int ai_white_type = 0;
 static std::unique_ptr<contrast_ai::RandomPolicy> random_black;
 static std::unique_ptr<contrast_ai::GreedyPolicy> greedy_black;
 static std::unique_ptr<contrast_ai::NTuplePolicy> ntuple_black;
+static std::unique_ptr<contrast_ai::RuleBasedPolicy2> rule2_black;
 static std::unique_ptr<contrast_ai::RandomPolicy> random_white;
 static std::unique_ptr<contrast_ai::GreedyPolicy> greedy_white;
 static std::unique_ptr<contrast_ai::NTuplePolicy> ntuple_white;
+static std::unique_ptr<contrast_ai::RuleBasedPolicy2> rule2_white;
 static char weights_path[256] = "build/weights_10k.bin";
 static bool ntuple_loaded = false;
 
@@ -427,17 +430,17 @@ void render_frame() {
 	ImGui::Separator();
 	
 	// AI type selection
-	const char* ai_types[] = { "Random", "Greedy", "NTuple" };
+	const char* ai_types[] = { "Random", "Greedy", "NTuple", "RuleBased2" };
 	ImGui::Text("Black:");
 	ImGui::SameLine();
 	ImGui::PushItemWidth(100);
-	ImGui::Combo("##BlackAI", &ai_black_type, ai_types, 3);
+	ImGui::Combo("##BlackAI", &ai_black_type, ai_types, IM_ARRAYSIZE(ai_types));
 	ImGui::PopItemWidth();
 	
 	ImGui::Text("White:");
 	ImGui::SameLine();
 	ImGui::PushItemWidth(100);
-	ImGui::Combo("##WhiteAI", &ai_white_type, ai_types, 3);
+	ImGui::Combo("##WhiteAI", &ai_white_type, ai_types, IM_ARRAYSIZE(ai_types));
 	ImGui::PopItemWidth();
 	
 	ImGui::SliderFloat("Delay (s)", &ai_delay, 0.1f, 2.0f);
@@ -457,11 +460,19 @@ void render_frame() {
 				ai_running = true;
 				ai_timer = 0.0f;
 				// Initialize AI policies
+				random_black.reset();
+				greedy_black.reset();
+				rule2_black.reset();
+				random_white.reset();
+				greedy_white.reset();
+				rule2_white.reset();
 				if (ai_black_type == 0) random_black = std::make_unique<contrast_ai::RandomPolicy>();
 				else if (ai_black_type == 1) greedy_black = std::make_unique<contrast_ai::GreedyPolicy>();
+				else if (ai_black_type == 3) rule2_black = std::make_unique<contrast_ai::RuleBasedPolicy2>();
 				// ntuple_black already loaded
 				if (ai_white_type == 0) random_white = std::make_unique<contrast_ai::RandomPolicy>();
 				else if (ai_white_type == 1) greedy_white = std::make_unique<contrast_ai::GreedyPolicy>();
+				else if (ai_white_type == 3) rule2_white = std::make_unique<contrast_ai::RuleBasedPolicy2>();
 				// ntuple_white already loaded
 			}
 		}
@@ -504,6 +515,8 @@ void render_frame() {
 						move = greedy_black->pick(*g_state);
 					} else if (ai_black_type == 2 && ntuple_black) {
 						move = ntuple_black->pick(*g_state);
+					} else if (ai_black_type == 3 && rule2_black) {
+						move = rule2_black->pick(*g_state);
 					}
 				} else {
 					if (ai_white_type == 0 && random_white) {
@@ -512,6 +525,8 @@ void render_frame() {
 						move = greedy_white->pick(*g_state);
 					} else if (ai_white_type == 2 && ntuple_white) {
 						move = ntuple_white->pick(*g_state);
+					} else if (ai_white_type == 3 && rule2_white) {
+						move = rule2_white->pick(*g_state);
 					}
 				}
 				

@@ -2,6 +2,7 @@ add_library(contrast_engine
   src/random_policy.cpp
   src/greedy_policy.cpp
   src/rule_based_policy.cpp
+  src/rule_based_policy2.cpp
   src/mcts.cpp
   src/ntuple.cpp
 )

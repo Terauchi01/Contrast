@@ -15,6 +15,7 @@ int main() {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE); // required for macOS core profile
   GLFWwindow* window = glfwCreateWindow(1200, 800, "contrast gui_debug", NULL, NULL);
   if (!window) {
   const char* errdesc = nullptr;
@@ -26,9 +27,13 @@ int main() {
       fprintf(stderr, "[gui_debug] SSH detected in environment - GUI may not be available over SSH.\n");
     }
 
-    // Try fallback: reset to default hints and try again (some macOS setups can't create core profile)
-    fprintf(stderr, "[gui_debug] attempting fallback with default window hints\n");
+    // Try fallback: reset hints but keep macOS-compatible context settings
+    fprintf(stderr, "[gui_debug] attempting fallback with core-profile hints\n");
     glfwDefaultWindowHints();
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
     GLFWwindow* fb = glfwCreateWindow(1200, 800, "contrast gui_debug (fallback)", NULL, NULL);
     if (!fb) {
   const char* desc2 = nullptr;
