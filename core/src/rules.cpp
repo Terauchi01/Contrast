@@ -1,12 +1,8 @@
 #include "contrast/rules.hpp"
 #include "contrast/game_state.hpp"
+#include "contrast/precomputed_move_table.hpp"
 
 namespace contrast {
-
-// Direction vectors as fixed arrays
-static constexpr int ORTHO[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
-static constexpr int DIAG[4][2] = {{1,1},{1,-1},{-1,1},{-1,-1}};
-static constexpr int ALL_8[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
 
 void Rules::legal_moves(const GameState& s, MoveList& out) {
   out.clear();
@@ -21,48 +17,45 @@ void Rules::legal_moves(const GameState& s, MoveList& out) {
     for (int x = 0; x < b.width(); ++x) {
       if (b.at(x,y).occupant != p) continue;
 
-      // Choose directions depending on tile under the piece
-      const int (*dirs)[2] = nullptr;
-      int num_dirs = 0;
-      
-      if (b.at(x,y).tile == TileType::None) {
-        dirs = ORTHO;
-        num_dirs = 4;
-      } else if (b.at(x,y).tile == TileType::Black) {
-        dirs = DIAG;
-        num_dirs = 4;
-      } else { // gray
-        dirs = ALL_8;
-        num_dirs = 8;
-      }
+      const auto tile = b.at(x, y).tile;
+      const auto tile_index = static_cast<int>(tile);
+      const int origin_index = y * b.width() + x;
+      const auto& table_entry = kMoveTable[tile_index][origin_index];
 
-      for (int i = 0; i < num_dirs; ++i) {
-        int dx = dirs[i][0];
-        int dy = dirs[i][1];
-        int tx = x + dx;
-        int ty = y + dy;
-        
-        if (!b.in_bounds(tx,ty)) continue;
-        // blocked by opponent
-        if (b.at(tx,ty).occupant != Player::None && b.at(tx,ty).occupant != p) continue;
+      for (uint8_t dir_idx = 0; dir_idx < table_entry.dir_count; ++dir_idx) {
+        const auto& dir = table_entry.dirs[dir_idx];
+        if (dir.step_count == 0) continue;
 
-        // if empty adjacent, simple move
-        if (b.at(tx,ty).occupant == Player::None) {
-          Move m; 
-          m.sx = x; m.sy = y; m.dx = tx; m.dy = ty; m.place_tile = false;
-          base_moves.push_back(m);
-        } else {
-          // jump over own pieces until first empty; opponent blocks
-          int jx = tx;
-          int jy = ty;
-          while (b.in_bounds(jx, jy) && b.at(jx,jy).occupant == p) {
-            jx += dx; jy += dy;
+        bool encountered_friend = false;
+
+        for (uint8_t step = 0; step < dir.step_count; ++step) {
+          int target_index = origin_index + dir.rel_index[step];
+          int ty = target_index / b.width();
+          int tx = target_index % b.width();
+          const auto& cell = b.at(tx, ty);
+
+          if (cell.occupant == Player::None) {
+            if (!encountered_friend) {
+              if (step == 0) {
+                Move m;
+                m.sx = x; m.sy = y; m.dx = tx; m.dy = ty; m.place_tile = false;
+                base_moves.push_back(m);
+              }
+            } else {
+              Move m;
+              m.sx = x; m.sy = y; m.dx = tx; m.dy = ty; m.place_tile = false;
+              base_moves.push_back(m);
+            }
+            break;
           }
-          if (b.in_bounds(jx,jy) && b.at(jx,jy).occupant == Player::None) {
-            Move m; 
-            m.sx = x; m.sy = y; m.dx = jx; m.dy = jy; m.place_tile = false;
-            base_moves.push_back(m);
+
+          if (cell.occupant == p) {
+            encountered_friend = true;
+            continue;
           }
+
+          // Opponent blocks further progression along this ray
+          break;
         }
       }
     }

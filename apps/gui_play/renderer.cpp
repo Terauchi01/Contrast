@@ -342,8 +342,14 @@ void render_frame() {
 						int bh = g_state->board().height();
 						for (int y = 0; y < bh; ++y) {
 							for (int x = 0; x < bw; ++x) {
-								if (g_state->board().at(x, y).tile == contrast::TileType::None) {
-									available_tile_locations.push_back({x, y});
+								const auto& cell = g_state->board().at(x, y);
+								bool is_origin = (x == sel_x && y == sel_y);
+								bool is_destination = (x == dest_x && y == dest_y);
+								if (cell.tile == contrast::TileType::None && !is_destination) {
+									bool empty_after_move = (cell.occupant == contrast::Player::None) || is_origin;
+									if (empty_after_move) {
+										available_tile_locations.push_back({x, y});
+									}
 								}
 							}
 						}
@@ -365,8 +371,14 @@ void render_frame() {
 						int bh = g_state->board().height();
 						for (int y = 0; y < bh; ++y) {
 							for (int x = 0; x < bw; ++x) {
-								if (g_state->board().at(x, y).tile == contrast::TileType::None) {
-									available_tile_locations.push_back({x, y});
+								const auto& cell = g_state->board().at(x, y);
+								bool is_origin = (x == sel_x && y == sel_y);
+								bool is_destination = (x == dest_x && y == dest_y);
+								if (cell.tile == contrast::TileType::None && !is_destination) {
+									bool empty_after_move = (cell.occupant == contrast::Player::None) || is_origin;
+									if (empty_after_move) {
+										available_tile_locations.push_back({x, y});
+									}
 								}
 							}
 						}
@@ -480,73 +492,80 @@ void render_frame() {
 	// Board rendering
 	ImGui::SameLine();
 	ImGui::BeginChild("Board", ImVec2(0,0), false);
-	
+
 	ImVec2 avail = ImGui::GetContentRegionAvail();
 	int bw = g_state->board().width();
 	int bh = g_state->board().height();
 	ImVec2 cs = compute_cell_size(avail.x, bw, 0);
-	
+
 	ImVec2 board_start = ImGui::GetCursorScreenPos();
 	ImDrawList* dl = ImGui::GetWindowDrawList();
-	
-	// Draw board
+
+	std::set<std::pair<int, int>> destination_cells;
+	if (current_phase == GamePhase::SELECT_DESTINATION) {
+		for (const auto& move : sel_moves) {
+			destination_cells.emplace(move.dx, move.dy);
+		}
+	}
+
+	std::set<std::pair<int, int>> tile_target_cells;
+	if (current_phase == GamePhase::SELECT_TILE_LOCATION) {
+		for (const auto& loc : available_tile_locations) {
+			tile_target_cells.emplace(loc.first, loc.second);
+		}
+	}
+
 	for (int y = 0; y < bh; ++y) {
 		for (int x = 0; x < bw; ++x) {
 			ImVec2 tl(board_start.x + x * cs.x, board_start.y + y * cs.y);
 			ImVec2 br(tl.x + cs.x, tl.y + cs.y);
 			ImVec2 center((tl.x + br.x) * 0.5f, (tl.y + br.y) * 0.5f);
-			
+
 			contrast::Cell cell = g_state->board().at(x, y);
-			
-			// Cell background based on tile type
-			ImU32 bg_color = IM_COL32(220, 220, 220, 255); // default light gray
+			ImU32 bg_color = IM_COL32(255, 255, 255, 255);
 			if (cell.tile == contrast::TileType::Black) {
-				bg_color = IM_COL32(60, 60, 60, 255);
+				bg_color = IM_COL32(50, 50, 50, 255);
 			} else if (cell.tile == contrast::TileType::Gray) {
-				bg_color = IM_COL32(140, 140, 140, 255);
+				bg_color = IM_COL32(160, 160, 160, 255);
 			}
-			
+
+			const std::pair<int, int> cell_coord{x, y};
+			bool is_selected = (x == sel_x && y == sel_y);
+			bool is_confirmed_dest = (x == dest_x && y == dest_y);
+			bool is_destination = destination_cells.count(cell_coord) > 0;
+			bool is_tile_target = tile_target_cells.count(cell_coord) > 0;
+
+			if (is_tile_target) {
+				bg_color = IM_COL32(200, 255, 255, 255);
+			} else if (is_selected) {
+				bg_color = IM_COL32(180, 200, 255, 255);
+			} else if (is_confirmed_dest) {
+				bg_color = IM_COL32(255, 230, 180, 255);
+			} else if (is_destination) {
+				bg_color = IM_COL32(200, 255, 200, 255);
+			}
+
 			dl->AddRectFilled(tl, br, bg_color);
 			dl->AddRect(tl, br, IM_COL32(100, 100, 100, 255), 0.0f, 0, 1.0f);
-			
-			// Draw arrows showing allowed directions
-			draw_arrows(dl, center, cs.x, cell.tile);
-			
-			// Draw piece if present
+
+			if (is_tile_target) {
+				dl->AddRect(tl, br, IM_COL32(0, 200, 255, 200), 0.0f, 0, 2.0f);
+			}
+			if (is_confirmed_dest) {
+				dl->AddRect(tl, br, IM_COL32(255, 170, 0, 220), 0.0f, 0, 2.0f);
+			}
+
 			if (cell.occupant != contrast::Player::None) {
 				bool is_black = (cell.occupant == contrast::Player::Black);
-				ImU32 piece_color = is_black ? IM_COL32(0, 0, 0, 255) : IM_COL32(255, 255, 255, 255);
-				draw_pentagon(dl, center, cs.x * 0.35f, piece_color, is_black);
-			}
-			
-			// Highlight selection
-			if (x == sel_x && y == sel_y) {
-				dl->AddRect(tl, br, IM_COL32(255, 255, 0, 255), 0.0f, 0, 3.0f);
-			}
-			
-			// Highlight destination if selected
-			if (x == dest_x && y == dest_y) {
-				dl->AddRect(tl, br, IM_COL32(255, 128, 0, 255), 0.0f, 0, 3.0f);
-			}
-			
-			// Highlight possible destinations (Step 2)
-			if (current_phase == GamePhase::SELECT_DESTINATION) {
-				for (const auto& m : sel_moves) {
-					if (m.dx == x && m.dy == y) {
-						dl->AddRect(tl, br, IM_COL32(0, 255, 0, 200), 0.0f, 0, 2.0f);
-						break;
-					}
-				}
-			}
-			
-			// Highlight available tile locations (Step 4)
-			if (current_phase == GamePhase::SELECT_TILE_LOCATION) {
-				for (const auto& loc : available_tile_locations) {
-					if (loc.first == x && loc.second == y) {
-						dl->AddRect(tl, br, IM_COL32(0, 200, 255, 200), 0.0f, 0, 2.0f);
-						break;
-					}
-				}
+				ImU32 piece_color = is_black ? IM_COL32(229, 62, 62, 255) : IM_COL32(49, 130, 206, 255);
+				draw_pentagon(dl, center, cs.x * 0.3f, piece_color, is_black);
+				draw_arrows(dl, center, cs.x, cell.tile);
+			} else if (cell.tile != contrast::TileType::None) {
+				const char* tile_text = (cell.tile == contrast::TileType::Black) ? "B" : "G";
+				ImVec2 text_size = ImGui::CalcTextSize(tile_text);
+				ImVec2 text_pos(center.x - text_size.x * 0.5f, center.y - text_size.y * 0.5f);
+				ImU32 text_color = (cell.tile == contrast::TileType::Black) ? IM_COL32(255, 255, 255, 255) : IM_COL32(0, 0, 0, 255);
+				dl->AddText(text_pos, text_color, tile_text);
 			}
 		}
 	}

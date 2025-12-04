@@ -8,6 +8,8 @@ option(BUILD_TESTS "Build tests" ON)
 
 add_subdirectory(core)
 add_subdirectory(engine)
+add_subdirectory(server)
+add_subdirectory(client)
 add_subdirectory(apps)
 if(BUILD_TESTS)
   enable_testing()
