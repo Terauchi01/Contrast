@@ -21,6 +21,7 @@ using namespace contrast_ai;
  */
 struct TrainingConfig {
     int num_games = 10000;              // 総学習ゲーム数
+    long long num_turns = 0;            // 総学習ターン数（TD更新回数, 0=未使用）
     float learning_rate = 0.01f;        // 学習率（実際は動的に変化）
     float discount_factor = 0.9f;       // 割引率（現在は未使用、TD(0)のため）
     float exploration_rate = 0.1f;      // ε-greedy の探索率
@@ -225,7 +226,8 @@ std::pair<int, int> td_learn_from_game(
     const GameResult& result,
     float current_learning_rate,
     bool is_vs_greedy,
-    bool swap_colors = false
+    bool swap_colors = false,
+    int max_updates = -1
 ) {
     if (result.states.empty()) return {0, 0};
     
@@ -236,6 +238,9 @@ std::pair<int, int> td_learn_from_game(
     // Backward updates from end to start
     // For each state, we assign reward based on final outcome from that player's perspective
     for (int i = result.states.size() - 1; i >= 0; --i) {
+        if (max_updates >= 0 && (black_updates + white_updates) >= max_updates) {
+            break;
+        }
         const auto& state = result.states[i];
         Player player = result.players[i];
         
@@ -287,86 +292,123 @@ std::pair<int, int> td_learn_from_game(
  * @param lr_min 最小学習率（終了時の値）
  * @return 現在の学習率
  */
-float calculate_learning_rate(int current_game, int total_games, float lr_max = 0.1f, float lr_min = 0.005f) {
-    float progress = static_cast<float>(current_game - 1) / static_cast<float>(total_games - 1);
+float calculate_learning_rate(long long current_step, long long total_steps, float lr_max = 0.1f, float lr_min = 0.005f) {
+    if (total_steps <= 1) {
+        return lr_max;
+    }
+
+    double progress = static_cast<double>(current_step - 1) / static_cast<double>(total_steps - 1);
+    if (progress < 0.0) progress = 0.0;
+    if (progress > 1.0) progress = 1.0;
     
     // 逆数ベースの減衰（序盤急速、後半緩やか）
     // k=19 で、progress=0.5のとき約lr=0.025（中間値）になる
     float k = 19.0f;
-    float lr = lr_min + (lr_max - lr_min) / (1.0f + k * progress * progress);
+    float lr = lr_min + (lr_max - lr_min) / static_cast<float>(1.0 + k * progress * progress);
     
     return lr;
 }
 
 /**
- * メイン学習ループ
- * 
- * 指定されたゲーム数だけセルフプレイを行い、TD学習で重みを更新
- * 
- * 主要な処理：
- * 1. ネットワークの初期化（または既存重みの読み込み）
- * 2. 対戦相手の設定（セルフプレイ/Greedy/前回のチェックポイント）
- * 3. 各ゲームのプレイと学習
- * 4. 学習率の動的調整（逆二乗減衰）
- * 5. チェックポイント保存と先手後手の入れ替え
- * 6. 統計情報の表示（勝率、手数、学習速度など）
- * 
- * 最適化：
- * - メモリ内コピーで前回ネットワークを保持（ディスクI/O削減）
- * - save_intervalごとに先手後手を入れ替え（学習バランス）
- * - 自動save_interval調整（総ゲーム数の1/10）
- * 
- * @param config 学習設定パラメータ
+ * 学習時の統計情報を保持する構造体
  */
-void train_network(const TrainingConfig& config) {
-    NTupleNetwork network;
-    NTupleNetwork* previous_network = nullptr;  // 前回のチェックポイント
+struct TrainingStats {
+    int black_wins = 0;
+    int white_wins = 0;
+    int draws = 0;
+    float total_moves = 0;
+    int ntuple_wins = 0;
+    int ntuple_losses = 0;
+    int ntuple_draws = 0;
+    int recent_black_updates = 0;
+    int recent_white_updates = 0;
+    int recent_games_count = 0;
+    long long total_updates = 0;
+    int games_played = 0;
+    std::deque<bool> recent_wins;
+};
+
+/**
+ * 学習時の対戦相手情報を保持する構造体
+ */
+struct OpponentState {
+    GreedyPolicy* greedy = nullptr;
+    RuleBasedPolicy* rulebased = nullptr;
+    NTupleNetwork* previous = nullptr;
+    std::string current_type;
+    bool is_vs_greedy = false;
+    bool is_vs_rulebased = false;
+    bool is_vs_previous = false;
     
-    // Automatically set save_interval to 1/10th of total games if not explicitly set
-    int actual_save_interval = config.save_interval;
-    if (config.save_interval == 1000) {  // Default value
-        actual_save_interval = std::max(100, config.num_games / 10);
-        std::cout << "Auto-adjusting save interval to " << actual_save_interval 
-                  << " (1/10th of total games)\n";
+    ~OpponentState() {
+        delete greedy;
+        delete rulebased;
+        delete previous;
     }
+};
+
+/**
+ * ネットワークを初期化し、既存重みがあればロードする
+ */
+void initialize_network(NTupleNetwork& network, const std::string& load_path) {
+    if (load_path.empty()) return;
     
-    // Load existing weights if specified
-    if (!config.load_path.empty()) {
-        std::cout << "Loading existing weights from: " << config.load_path << "\n";
-        try {
-            network.load(config.load_path);
-            std::cout << "Weights loaded successfully!\n";
-        } catch (const std::exception& e) {
-            std::cerr << "Warning: Failed to load weights: " << e.what() << "\n";
-            std::cerr << "Starting with random weights instead.\n";
-        }
+    std::cout << "Loading existing weights from: " << load_path << "\n";
+    try {
+        network.load(load_path);
+        std::cout << "Weights loaded successfully!\n";
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Failed to load weights: " << e.what() << "\n";
+        std::cerr << "Starting with random weights instead.\n";
     }
+}
+
+/**
+ * save_intervalを自動調整（総ゲーム数の1/10）
+ */
+int adjust_save_interval(const TrainingConfig& config) {
+    if (config.save_interval != 1000) {  // デフォルト値以外なら変更しない
+        return config.save_interval;
+    }
+    int adjusted = std::max(100, config.num_games / 10);
+    std::cout << "Auto-adjusting save interval to " << adjusted 
+              << " (1/10th of total games)\n";
+    return adjusted;
+}
+
+/**
+ * 対戦相手を初期化
+ */
+void initialize_opponent(OpponentState& opp, const std::string& opponent_type) {
+    opp.current_type = opponent_type;
+    opp.is_vs_greedy = (opponent_type == "greedy");
+    opp.is_vs_rulebased = (opponent_type == "rulebased");
+    opp.is_vs_previous = false;  // 常にリアルタイムセルフプレイ
     
-    std::mt19937 rng(std::random_device{}());
-    
-    // Create opponents if needed
-    GreedyPolicy* greedy_opponent = nullptr;
-    RuleBasedPolicy* rulebased_opponent = nullptr;
-    bool is_vs_greedy = (config.opponent == "greedy");
-    bool is_vs_rulebased = (config.opponent == "rulebased");
-    bool is_vs_previous = (config.opponent == "self");  // セルフプレイ時は前回の自分と対戦
-    
-    if (is_vs_greedy) {
-        greedy_opponent = new GreedyPolicy();
+    if (opp.is_vs_greedy) {
+        opp.greedy = new GreedyPolicy();
         std::cout << "Training against Greedy opponent\n";
-    } else if (is_vs_rulebased) {
-        rulebased_opponent = new RuleBasedPolicy();
+    } else if (opp.is_vs_rulebased) {
+        opp.rulebased = new RuleBasedPolicy();
         std::cout << "Training against RuleBased opponent\n";
-    } else if (is_vs_previous) {
-        std::cout << "Training with self-play (vs previous checkpoint)\n";
     } else {
-        std::cout << "Training with self-play\n";
+        std::cout << "Training with real-time self-play (same network for both sides)\n";
     }
-    
+}
+
+/**
+ * 学習設定を表示
+ */
+void print_training_config(const TrainingConfig& config, int actual_save_interval) {
     std::cout << "Starting N-tuple network training\n";
     std::cout << "Configuration:\n";
     std::cout << "  Opponent: " << config.opponent << "\n";
-    std::cout << "  Games: " << config.num_games << "\n";
+    if (config.num_turns > 0) {
+        std::cout << "  Turns: " << config.num_turns << " (TD updates)\n";
+        std::cout << "  Games: " << config.num_games << " (cap)\n";
+    } else {
+        std::cout << "  Games: " << config.num_games << "\n";
+    }
     std::cout << "  Initial learning rate: " << config.learning_rate << "\n";
     std::cout << "  Learning rate schedule: 0.1 -> 0.005 (inverse-square decay)\n";
     std::cout << "    - Fast decay in early games\n";
@@ -375,264 +417,310 @@ void train_network(const TrainingConfig& config) {
     std::cout << "  Exploration rate: " << config.exploration_rate << "\n";
     std::cout << "  Save interval: " << actual_save_interval << "\n";
     std::cout << "  Save path: " << config.save_path << "\n\n";
+}
+
+/**
+ * 対戦相手を切り替える
+ */
+void switch_opponent(OpponentState& opp, const NTupleNetwork& network, int game, float win_rate) {
+    std::cout << "\n=== ";
+    if (game == 1000) {
+        std::cout << "INITIAL TRAINING COMPLETE";
+    } else {
+        std::cout << "WIN RATE THRESHOLD REACHED";
+    }
+    std::cout << " ===\n";
+    std::cout << "Game: " << game << " | Recent 1000 games win rate: " 
+              << (win_rate * 100.0f) << "%\n";
+    std::cout << "Switching opponent from " << opp.current_type << " to ";
     
-    auto start_time = std::chrono::steady_clock::now();
+    if (opp.current_type == "greedy") {
+        opp.current_type = "rulebased";
+        delete opp.greedy;
+        opp.greedy = nullptr;
+        opp.rulebased = new RuleBasedPolicy();
+        opp.is_vs_greedy = false;
+        opp.is_vs_rulebased = true;
+        opp.is_vs_previous = false;
+        std::cout << "rulebased\n";
+    } else if (opp.current_type == "rulebased") {
+        opp.current_type = "self";
+        delete opp.rulebased;
+        opp.rulebased = nullptr;
+        opp.is_vs_greedy = false;
+        opp.is_vs_rulebased = false;
+        opp.is_vs_previous = false;
+        std::cout << "self (real-time self-play)\n";
+    } else {
+        std::cout << "self (already in real-time self-play mode)\n";
+    }
     
-    int black_wins = 0;
-    int white_wins = 0;
-    int draws = 0;
-    float total_moves = 0;
-    
-    // 先手後手の統計（NTupleの視点）
-    int ntuple_wins = 0;
-    int ntuple_losses = 0;
-    int ntuple_draws = 0;
-    
-    // 先手後手の切替（1万ゲームごと）
-    bool swap_colors = false;  // 初期はNTupleが黒（先手）
-    std::cout << "Initial colors: NTuple plays as Black\n";
-    std::cout << "Colors will swap every 10,000 games\n\n";
-    
-    // 直近1000試合の勝率追跡（対戦相手切替用）
-    std::deque<bool> recent_wins;  // true=勝ち, false=負けまたは引き分け
+    std::cout << "===================================\n\n";
+}
+
+/**
+ * 対戦相手を切り替えるべきかチェック
+ */
+bool should_switch_opponent(const TrainingStats& stats, int game) {
     const int WIN_RATE_WINDOW = 1000;
-    const float WIN_RATE_THRESHOLD = 0.55f;  // 55%で対戦相手切替
-    std::string current_opponent_type = config.opponent;  // 現在の対戦相手タイプ
+    const float WIN_RATE_THRESHOLD = 0.55f;
     
-    // デバッグ用：直近100ゲームの学習統計
-    int recent_black_updates = 0;
-    int recent_white_updates = 0;
-    int recent_games_count = 0;
-    
-    for (int game = 1; game <= config.num_games; ++game) {
-        // Calculate current learning rate with inverse-square decay
-        // 序盤は急速に減衰、中盤以降は緩やかに減衰
-        float current_lr = calculate_learning_rate(game, config.num_games);
-        
-        // Play game
-        GameResult result = play_training_game(network, config, greedy_opponent, rulebased_opponent, previous_network, rng, swap_colors);
-        
-        // Learn from game with current learning rate
-        // 前回のネットワークと対戦している場合、学習対象のネットワークの手のみ更新
-        bool update_vs_previous = (previous_network != nullptr);
-        auto [black_upd, white_upd] = td_learn_from_game(network, result, current_lr, is_vs_greedy || is_vs_rulebased || update_vs_previous, swap_colors);
-        
-        // 統計を蓄積
-        recent_black_updates += black_upd;
-        recent_white_updates += white_upd;
-        recent_games_count++;
-        
-        // Update statistics (from board perspective)
-        if (result.winner == Player::Black) black_wins++;
-        else if (result.winner == Player::White) white_wins++;
-        else draws++;
-        total_moves += result.num_moves;
-        
-        // Update NTuple-specific statistics
-        Player ntuple_player = swap_colors ? Player::White : Player::Black;
-        if (result.winner == ntuple_player) {
-            ntuple_wins++;
-            recent_wins.push_back(true);
-        } else if (result.winner != Player::None) {
-            ntuple_losses++;
-            recent_wins.push_back(false);
-        } else {
-            ntuple_draws++;
-            recent_wins.push_back(false);  // 引き分けは「勝ち」としてカウントしない
-        }
-        
-        // 直近1000試合の勝率を維持（古い結果を削除）
-        if (recent_wins.size() > WIN_RATE_WINDOW) {
-            recent_wins.pop_front();
-        }
-        
-        // 直近1000試合の勝率をチェックして対戦相手を切り替え
-        if (recent_wins.size() >= WIN_RATE_WINDOW) {
-            int recent_win_count = std::count(recent_wins.begin(), recent_wins.end(), true);
-            float recent_win_rate = static_cast<float>(recent_win_count) / WIN_RATE_WINDOW;
-            
-            // 最初の1000試合は無条件で切り替え、その後は55%を超えたら切り替え
-            bool should_switch = (game == WIN_RATE_WINDOW) || (recent_win_rate > WIN_RATE_THRESHOLD);
-            
-            if (should_switch) {
-                std::cout << "\n=== ";
-                if (game == WIN_RATE_WINDOW) {
-                    std::cout << "INITIAL TRAINING COMPLETE";
-                } else {
-                    std::cout << "WIN RATE THRESHOLD REACHED";
-                }
-                std::cout << " ===\n";
-                std::cout << "Game: " << game << " | Recent " << WIN_RATE_WINDOW << " games win rate: " 
-                          << (recent_win_rate * 100.0f) << "%\n";
-                std::cout << "Switching opponent from " << current_opponent_type << " to ";
-                
-                // 対戦相手を切り替え（greedy → rulebased → self）
-                if (current_opponent_type == "greedy") {
-                    // Greedy → RuleBased
-                    current_opponent_type = "rulebased";
-                    delete greedy_opponent;
-                    greedy_opponent = nullptr;
-                    rulebased_opponent = new RuleBasedPolicy();
-                    is_vs_greedy = false;
-                    is_vs_rulebased = true;
-                    is_vs_previous = false;
-                    std::cout << "rulebased\n";
-                } else if (current_opponent_type == "rulebased") {
-                    // RuleBased → Self-play
-                    current_opponent_type = "self";
-                    delete rulebased_opponent;
-                    rulebased_opponent = nullptr;
-                    is_vs_greedy = false;
-                    is_vs_rulebased = false;
-                    is_vs_previous = true;
-                    // 現在のネットワークをコピーして対戦相手にする
-                    previous_network = new NTupleNetwork(network);
-                    std::cout << "self (self-play vs previous checkpoint)\n";
-                } else {
-                    // すでにself-playの場合は対戦相手を更新するだけ
-                    std::cout << "self (updating opponent checkpoint)\n";
-                    if (previous_network != nullptr) {
-                        delete previous_network;
-                    }
-                    previous_network = new NTupleNetwork(network);
-                }
-                
-                std::cout << "===================================\n\n";
-                
-                // 勝率履歴をリセット
-                recent_wins.clear();
-            }
-        }
-        
-        // Progress reporting
-        if (game % 100 == 0) {
-            auto current_time = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                current_time - start_time).count();
-            
-            float avg_moves = total_moves / game;
-            float games_per_sec = game / static_cast<float>(elapsed + 1);
-            float display_lr = calculate_learning_rate(game, config.num_games);
-            float ntuple_win_rate = 100.0f * ntuple_wins / game;
-            
-            // 直近1000試合の勝率を計算
-            float recent_1000_win_rate = 0.0f;
-            if (!recent_wins.empty()) {
-                int recent_win_count = std::count(recent_wins.begin(), recent_wins.end(), true);
-                recent_1000_win_rate = 100.0f * recent_win_count / recent_wins.size();
-            }
-            
-            std::cout << "Game " << std::setw(6) << game << "/" << config.num_games
-                      << " | B:" << std::setw(5) << black_wins
-                      << " W:" << std::setw(5) << white_wins
-                      << " D:" << std::setw(4) << draws
-                      << " | NTuple:" << std::setw(5) << std::setprecision(1) << ntuple_win_rate << "%";
-            
-            // 直近1000試合の勝率を表示
-            if (recent_wins.size() >= 100) {  // 最低100試合以上で表示
-                std::cout << " (R" << recent_wins.size() << ":" 
-                          << std::setw(4) << std::setprecision(1) << recent_1000_win_rate << "%)";
-            }
-            
-            std::cout << " | Opp:" << current_opponent_type
-                      << " | LR:" << std::setw(6) << std::fixed << std::setprecision(4) << display_lr
-                      << " | " << std::setw(4) << std::setprecision(1) << avg_moves << "m"
-                      << " | " << std::setw(5) << std::setprecision(1) << games_per_sec << " g/s";
-            
-            // デバッグ：直近100ゲームの更新統計を表示
-            if (recent_games_count > 0) {
-                std::cout << " | Updates B:" << recent_black_updates 
-                          << " W:" << recent_white_updates
-                          << " (swap=" << (swap_colors ? "W" : "B") << ")";
-            }
-            std::cout << "\n";
-            
-            // 統計をリセット
-            recent_black_updates = 0;
-            recent_white_updates = 0;
-            recent_games_count = 0;
-        }
-        
-        // Save checkpoint
-        if (game % actual_save_interval == 0) {
-            std::string checkpoint_path = config.save_path + "." + std::to_string(game);
-            network.save(checkpoint_path);
-            std::cout << "Saved checkpoint: " << checkpoint_path << "\n";
-            
-            // デバッグ: 現在のネットワークの評価値サンプルを表示
-            GameState debug_state;
-            debug_state.reset();
-            float initial_eval = network.evaluate(debug_state);
-            std::cout << "  Debug: Initial position eval = " << initial_eval 
-                      << " (current_player=" << (debug_state.current_player() == Player::Black ? "Black" : "White") << ")\n";
-            
-            // 前回のネットワークと対戦する場合、現在のネットワークのコピーを作成（高速なメモリ内コピー）
-            if (is_vs_previous) {
-                // 古い前回のネットワークを削除
-                if (previous_network != nullptr) {
-                    delete previous_network;
-                }
-                // 新しい前回のネットワークとして現在のネットワークのコピーを作成（ディスクI/Oなし）
-                previous_network = new NTupleNetwork(network);
-                
-                // デバッグ: 前回のネットワークと現在のネットワークの評価値が一致するか確認
-                float prev_eval = previous_network->evaluate(debug_state);
-                std::cout << "  Debug: Previous network eval = " << prev_eval << "\n";
-                if (std::abs(initial_eval - prev_eval) > 0.001f) {
-                    std::cerr << "  WARNING: Network copy mismatch! Diff = " 
-                              << (initial_eval - prev_eval) << "\n";
-                }
-                
-                std::cout << "Updated opponent to latest checkpoint (in-memory copy)\n";
-            }
-        }
-        
-        // Swap colors every 10,000 games (independent of save interval)
-        const int COLOR_SWAP_INTERVAL = 10000;
-        if (game % COLOR_SWAP_INTERVAL == 0) {
-            swap_colors = !swap_colors;
-            std::cout << "Swapped colors at game " << game 
-                      << ": NTuple now plays as " 
-                      << (swap_colors ? "White" : "Black") << "\n";
-        }
+    if (stats.recent_wins.size() < WIN_RATE_WINDOW) {
+        return false;
     }
     
-    // Final save
-    network.save(config.save_path);
+    int recent_win_count = std::count(stats.recent_wins.begin(), stats.recent_wins.end(), true);
+    float recent_win_rate = static_cast<float>(recent_win_count) / WIN_RATE_WINDOW;
     
-    // Clean up
-    if (greedy_opponent != nullptr) {
-        delete greedy_opponent;
-    }
-    if (rulebased_opponent != nullptr) {
-        delete rulebased_opponent;
-    }
-    if (previous_network != nullptr) {
-        delete previous_network;
+    return (game == WIN_RATE_WINDOW) || (recent_win_rate > WIN_RATE_THRESHOLD);
+}
+
+/**
+ * 進捗を表示
+ */
+void print_progress(
+    const TrainingConfig& config,
+    const TrainingStats& stats,
+    const OpponentState& opp,
+    int game,
+    bool swap_colors,
+    std::chrono::steady_clock::time_point start_time
+) {
+    auto current_time = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        current_time - start_time).count();
+    
+    float avg_moves = stats.total_moves / game;
+    float games_per_sec = game / static_cast<float>(elapsed + 1);
+    
+    // 学習率計算
+    long long total_steps = (config.num_turns > 0) ? config.num_turns : static_cast<long long>(config.num_games);
+    long long current_step = (config.num_turns > 0) ? std::min(config.num_turns, stats.total_updates + 1) : static_cast<long long>(game);
+    float display_lr = calculate_learning_rate(current_step, std::max(1LL, total_steps));
+    
+    float ntuple_win_rate = 100.0f * stats.ntuple_wins / game;
+    
+    // 直近1000試合の勝率を計算
+    float recent_1000_win_rate = 0.0f;
+    if (!stats.recent_wins.empty()) {
+        int recent_win_count = std::count(stats.recent_wins.begin(), stats.recent_wins.end(), true);
+        recent_1000_win_rate = 100.0f * recent_win_count / stats.recent_wins.size();
     }
     
+    std::cout << "Game " << std::setw(6) << game << "/" << config.num_games;
+    if (config.num_turns > 0) {
+        std::cout << " | Turns " << stats.total_updates << "/" << config.num_turns;
+    }
+    std::cout << " | B:" << std::setw(5) << stats.black_wins
+              << " W:" << std::setw(5) << stats.white_wins
+              << " D:" << std::setw(4) << stats.draws
+              << " | NTuple:" << std::setw(5) << std::setprecision(1) << ntuple_win_rate << "%";
+    
+    if (stats.recent_wins.size() >= 100) {
+        std::cout << " (R" << stats.recent_wins.size() << ":" 
+                  << std::setw(4) << std::setprecision(1) << recent_1000_win_rate << "%)";
+    }
+    
+    std::cout << " | Opp:" << opp.current_type
+              << " | LR:" << std::setw(6) << std::fixed << std::setprecision(4) << display_lr
+              << " | " << std::setw(4) << std::setprecision(1) << avg_moves << "m"
+              << " | " << std::setw(5) << std::setprecision(1) << games_per_sec << " g/s";
+    
+    if (stats.recent_games_count > 0) {
+        std::cout << " | Updates B:" << stats.recent_black_updates 
+                  << " W:" << stats.recent_white_updates;
+    }
+    std::cout << "\n";
+}
+
+/**
+ * チェックポイントを保存
+ */
+void save_checkpoint(
+    NTupleNetwork& network,
+    OpponentState& opp,
+    const std::string& save_path,
+    int game
+) {
+    std::string checkpoint_path = save_path + "." + std::to_string(game);
+    network.save(checkpoint_path);
+    std::cout << "Saved checkpoint: " << checkpoint_path << "\n";
+    
+    // デバッグ: 評価値サンプル表示
+    GameState debug_state;
+    debug_state.reset();
+    float initial_eval = network.evaluate(debug_state);
+    std::cout << "  Debug: Initial position eval = " << initial_eval 
+              << " (current_player=" << (debug_state.current_player() == Player::Black ? "Black" : "White") << ")\n";
+}
+
+/**
+ * 最終統計を表示
+ */
+void print_final_statistics(
+    const TrainingConfig& config,
+    const TrainingStats& stats,
+    std::chrono::steady_clock::time_point start_time
+) {
     auto end_time = std::chrono::steady_clock::now();
     auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
         end_time - start_time).count();
     
     std::cout << "\nTraining complete!\n";
     std::cout << "Total time: " << total_elapsed << " seconds\n";
+    if (config.num_turns > 0) {
+        std::cout << "Total TD updates (turns): " << stats.total_updates << "\n";
+    }
+
+    int denom_games = std::max(1, stats.games_played);
     std::cout << "\nBoard perspective statistics:\n";
-    std::cout << "  Black wins: " << black_wins << " (" 
-              << (100.0f * black_wins / config.num_games) << "%)\n";
-    std::cout << "  White wins: " << white_wins << " (" 
-              << (100.0f * white_wins / config.num_games) << "%)\n";
-    std::cout << "  Draws: " << draws << " (" 
-              << (100.0f * draws / config.num_games) << "%)\n";
+    std::cout << "  Black wins: " << stats.black_wins << " (" 
+              << (100.0f * stats.black_wins / denom_games) << "%)\n";
+    std::cout << "  White wins: " << stats.white_wins << " (" 
+              << (100.0f * stats.white_wins / denom_games) << "%)\n";
+    std::cout << "  Draws: " << stats.draws << " (" 
+              << (100.0f * stats.draws / denom_games) << "%)\n";
     std::cout << "\nN-tuple performance (alternating colors):\n";
-    std::cout << "  Wins: " << ntuple_wins << " (" 
-              << (100.0f * ntuple_wins / config.num_games) << "%)\n";
-    std::cout << "  Losses: " << ntuple_losses << " (" 
-              << (100.0f * ntuple_losses / config.num_games) << "%)\n";
-    std::cout << "  Draws: " << ntuple_draws << " (" 
-              << (100.0f * ntuple_draws / config.num_games) << "%)\n";
-    std::cout << "  Average moves per game: " << (total_moves / config.num_games) << "\n";
+    std::cout << "  Wins: " << stats.ntuple_wins << " (" 
+              << (100.0f * stats.ntuple_wins / denom_games) << "%)\n";
+    std::cout << "  Losses: " << stats.ntuple_losses << " (" 
+              << (100.0f * stats.ntuple_losses / denom_games) << "%)\n";
+    std::cout << "  Draws: " << stats.ntuple_draws << " (" 
+              << (100.0f * stats.ntuple_draws / denom_games) << "%)\n";
+    std::cout << "  Average moves per game: " << (stats.total_moves / denom_games) << "\n";
     std::cout << "\nWeights saved to: " << config.save_path << "\n";
+}
+
+/**
+ * メイン学習ループ（リファクタリング版）
+ * 
+ * 学習処理を複数の小さな関数に分割し、見通しを良くしたバージョン
+ * 
+ * @param config 学習設定パラメータ
+ */
+void train_network(const TrainingConfig& config) {
+    // 初期化
+    NTupleNetwork network;
+    initialize_network(network, config.load_path);
+    
+    int actual_save_interval = adjust_save_interval(config);
+    
+    OpponentState opp;
+    initialize_opponent(opp, config.opponent);
+    
+    print_training_config(config, actual_save_interval);
+    
+    std::mt19937 rng(std::random_device{}());
+    auto start_time = std::chrono::steady_clock::now();
+    
+    TrainingStats stats;
+    const int WIN_RATE_WINDOW = 1000;
+    
+    auto get_total_steps = [&]() -> long long {
+        return (config.num_turns > 0) ? config.num_turns : static_cast<long long>(config.num_games);
+    };
+
+    auto get_current_step = [&](int game_index_1based) -> long long {
+        if (config.num_turns > 0) {
+            return std::min(config.num_turns, stats.total_updates + 1);
+        }
+        return static_cast<long long>(game_index_1based);
+    };
+
+    // メイン学習ループ
+    for (int game = 1; game <= config.num_games; ++game) {
+        if (config.num_turns > 0 && stats.total_updates >= config.num_turns) {
+            break;
+        }
+        
+        // 学習率計算
+        long long total_steps = get_total_steps();
+        long long current_step = get_current_step(game);
+        float current_lr = calculate_learning_rate(current_step, std::max(1LL, total_steps));
+        
+        // ゲームプレイ（常にリアルタイムセルフプレイ、swap_colorsなし）
+        GameResult result = play_training_game(
+            network, config, opp.greedy, opp.rulebased, opp.previous, rng, false
+        );
+        
+        // TD学習
+        bool update_vs_previous = (opp.previous != nullptr);
+        int remaining_updates = -1;
+        if (config.num_turns > 0) {
+            long long remain_ll = config.num_turns - stats.total_updates;
+            remaining_updates = (remain_ll > static_cast<long long>(std::numeric_limits<int>::max()))
+                ? std::numeric_limits<int>::max()
+                : static_cast<int>(std::max(0LL, remain_ll));
+        }
+        
+        auto [black_upd, white_upd] = td_learn_from_game(
+            network, result, current_lr,
+            opp.is_vs_greedy || opp.is_vs_rulebased,  // selfの場合は両方の手番を学習
+            false, remaining_updates
+        );
+
+        stats.total_updates += static_cast<long long>(black_upd) + static_cast<long long>(white_upd);
+        stats.games_played++;
+        stats.recent_black_updates += black_upd;
+        stats.recent_white_updates += white_upd;
+        stats.recent_games_count++;
+        
+        // 統計更新
+        if (result.winner == Player::Black) stats.black_wins++;
+        else if (result.winner == Player::White) stats.white_wins++;
+        else stats.draws++;
+        stats.total_moves += result.num_moves;
+        
+        // NTuple統計更新（vs 固定相手の場合のみカウント、selfの場合は盤面統計のみ）
+        Player ntuple_player = Player::Black;  // 固定相手の場合はBlackを担当
+        if (opp.is_vs_greedy || opp.is_vs_rulebased) {
+            // 固定相手との対戦時のみNTupleの勝率を追跡
+            if (result.winner == ntuple_player) {
+                stats.ntuple_wins++;
+                stats.recent_wins.push_back(true);
+            } else if (result.winner != Player::None) {
+                stats.ntuple_losses++;
+                stats.recent_wins.push_back(false);
+            } else {
+                stats.ntuple_draws++;
+                stats.recent_wins.push_back(false);
+            }
+        }
+        
+        // 勝率ウィンドウ維持
+        if (stats.recent_wins.size() > WIN_RATE_WINDOW) {
+            stats.recent_wins.pop_front();
+        }
+        
+        // 対戦相手切り替えチェック
+        if (should_switch_opponent(stats, game)) {
+            int recent_win_count = std::count(stats.recent_wins.begin(), stats.recent_wins.end(), true);
+            float recent_win_rate = static_cast<float>(recent_win_count) / WIN_RATE_WINDOW;
+            switch_opponent(opp, network, game, recent_win_rate);
+            stats.recent_wins.clear();
+        }
+        
+        // 進捗表示
+        if (game % 10000 == 0) {
+            print_progress(config, stats, opp, game, false, start_time);
+            stats.recent_black_updates = 0;
+            stats.recent_white_updates = 0;
+            stats.recent_games_count = 0;
+        }
+
+        if (config.num_turns > 0 && stats.total_updates >= config.num_turns) {
+            break;
+        }
+        
+        // チェックポイント保存
+        if (game % actual_save_interval == 0) {
+            save_checkpoint(network, opp, config.save_path, game);
+        }
+    }
+    
+    // 最終保存と統計表示
+    network.save(config.save_path);
+    print_final_statistics(config, stats, start_time);
 }
 
 /**
@@ -661,6 +749,8 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "--games" && i + 1 < argc) {
             config.num_games = std::stoi(argv[++i]);
+        } else if (arg == "--turns" && i + 1 < argc) {
+            config.num_turns = std::stoll(argv[++i]);
         } else if (arg == "--lr" && i + 1 < argc) {
             config.learning_rate = std::stof(argv[++i]);
         } else if (arg == "--discount" && i + 1 < argc) {
@@ -679,6 +769,7 @@ int main(int argc, char* argv[]) {
             std::cout << "Usage: " << argv[0] << " [options]\n";
             std::cout << "Options:\n";
             std::cout << "  --games N          Number of training games (default: 10000)\n";
+            std::cout << "  --turns N          Number of TD updates (state updates). If set, training stops when turns reached.\n";
             std::cout << "  --lr RATE          Learning rate (default: 0.01)\n";
             std::cout << "  --discount GAMMA   Discount factor (default: 0.9)\n";
             std::cout << "  --epsilon EPS      Exploration rate (default: 0.1)\n";

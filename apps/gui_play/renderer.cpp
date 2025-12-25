@@ -5,6 +5,7 @@
 #include "contrast_ai/ntuple.hpp"
 #include "contrast_ai/greedy_policy.hpp"
 #include "contrast_ai/rule_based_policy.hpp"
+#include "contrast_ai/rule_based_policy2.hpp"
 #include <set>
 #include <string>
 #include <memory>
@@ -39,12 +40,14 @@ static std::vector<std::pair<int, int>> available_tile_locations;  // Empty cell
 enum class AIType {
 	GREEDY,
 	RULEBASED,
+	RULEBASED2,
 	NTUPLE
 };
 static AIType current_ai_type = AIType::GREEDY;
 static std::unique_ptr<contrast_ai::NTuplePolicy> ntuple_ai;
 static std::unique_ptr<contrast_ai::GreedyPolicy> greedy_ai;
 static std::unique_ptr<contrast_ai::RuleBasedPolicy> rulebased_ai;
+static std::unique_ptr<contrast_ai::RuleBasedPolicy2> rulebased2_ai;
 static bool ai_loaded = false;
 static bool ai_thinking = false;
 static contrast::Player human_player = contrast::Player::Black;  // Human plays as Black by default
@@ -178,6 +181,10 @@ static void ensure_ai_loaded() {
 		rulebased_ai = std::make_unique<contrast_ai::RuleBasedPolicy>();
 		ai_loaded = true;
 		std::cout << "Loaded RuleBased AI\n";
+	} else if (current_ai_type == AIType::RULEBASED2) {
+		rulebased2_ai = std::make_unique<contrast_ai::RuleBasedPolicy2>();
+		ai_loaded = true;
+		std::cout << "Loaded RuleBasedPolicy2 AI\n";
 	} else if (current_ai_type == AIType::NTUPLE && !g_weights_path.empty()) {
 		ntuple_ai = std::make_unique<contrast_ai::NTuplePolicy>();
 		if (ntuple_ai->load(g_weights_path)) {
@@ -226,6 +233,8 @@ static void ai_make_move() {
 		best_move = greedy_ai->pick(*g_state);
 	} else if (current_ai_type == AIType::RULEBASED && rulebased_ai) {
 		best_move = rulebased_ai->pick(*g_state);
+	} else if (current_ai_type == AIType::RULEBASED2 && rulebased2_ai) {
+		best_move = rulebased2_ai->pick(*g_state);
 	} else if (current_ai_type == AIType::NTUPLE && ntuple_ai) {
 		best_move = ntuple_ai->pick(*g_state);
 	} else {
@@ -443,6 +452,10 @@ void render_frame() {
 		current_ai_type = AIType::RULEBASED;
 		ai_changed = true;
 	}
+	if (ImGui::RadioButton("RuleBased2 AI", current_ai_type == AIType::RULEBASED2)) {
+		current_ai_type = AIType::RULEBASED2;
+		ai_changed = true;
+	}
 	if (ImGui::RadioButton("N-tuple AI", current_ai_type == AIType::NTUPLE)) {
 		current_ai_type = AIType::NTUPLE;
 		ai_changed = true;
@@ -452,6 +465,7 @@ void render_frame() {
 		ai_loaded = false;
 		greedy_ai.reset();
 		rulebased_ai.reset();
+		rulebased2_ai.reset();
 		ntuple_ai.reset();
 		ensure_ai_loaded();
 	}

@@ -29,6 +29,7 @@
 #include "contrast/types.hpp"
 #include "contrast_ai/random_policy.hpp"
 #include "contrast_ai/rule_based_policy.hpp"
+#include "contrast_ai/rule_based_policy2.hpp"
 
 namespace {
 
@@ -195,6 +196,14 @@ class RuleBasedPolicyAdapter final : public PolicyAdapter {
     contrast_ai::RuleBasedPolicy policy_;
 };
 
+class RuleBasedPolicy2Adapter final : public PolicyAdapter {
+   public:
+    contrast::Move pick(const contrast::GameState& state) override { return policy_.pick(state); }
+
+   private:
+    contrast_ai::RuleBasedPolicy2 policy_;
+};
+
 class AutoPlayer {
    public:
     static std::unique_ptr<AutoPlayer> Create(const std::string& model_name,
@@ -208,6 +217,8 @@ class AutoPlayer {
             policy = std::make_unique<RandomPolicyAdapter>();
         } else if (normalized == "rule" || normalized == "rulebase" || normalized == "rulebased") {
             policy = std::make_unique<RuleBasedPolicyAdapter>();
+        } else if (normalized == "rule2" || normalized == "rulebased2" || normalized == "rulepolicy2") {
+            policy = std::make_unique<RuleBasedPolicy2Adapter>();
         } else {
             std::cerr << "[AUTO] Unsupported model: " << model_name << std::endl;
             return nullptr;

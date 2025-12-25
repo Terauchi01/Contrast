@@ -1,0 +1,245 @@
+import math
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from contrast_game import P2, ContrastGame, flip_action
+
+
+class MCTS:
+    def __init__(
+        self,
+        network: torch.nn.Module,
+        device: torch.device,
+        alpha=0.3,
+        c_puct=1.0,
+        epsilon=0.25,
+        debug: bool = False,
+    ):
+        self.network = network
+        self.device = device
+        self.alpha = alpha
+        self.c_puct = c_puct
+        self.eps = epsilon
+        self.debug = debug
+
+        # 状態の識別キー: (pieces_bytes, tiles_bytes, counts_bytes, player_int, move_count)
+        self.P = {}
+        self.N = {}
+        self.W = {}
+
+    def game_to_key(self, game: ContrastGame):
+        """
+        ContrastGameの状態を一意なハッシュ可能オブジェクト(タプル)に変換
+        修正: move_countを含めることで、盤面が同一でも手数が違えば別状態として扱い、循環(無限再帰)を防ぐ
+        """
+        return (
+            game.pieces.tobytes(),
+            game.tiles.tobytes(),
+            game.tile_counts.tobytes(),
+            game.current_player,
+            game.move_count,  # <--- 重要: これを追加
+        )
+
+    def search(self, root_game: ContrastGame, num_simulations: int):
+        root_key = self.game_to_key(root_game)
+
+        # 未展開ならルートを展開
+        if root_key not in self.P:
+            self._expand(root_game)
+
+        # 辞書アクセスに修正 (None対策)
+        if root_key not in self.P:
+            return {}, {}
+
+        valid_actions = list(self.P[root_key].keys())
+
+        # 合法手がない場合
+        if not valid_actions:
+            return {}, {}
+
+        # ルートノードにディリクレノイズを付加
+        dirichlet_noise = np.random.dirichlet([self.alpha] * len(valid_actions))
+        for i, action in enumerate(valid_actions):
+            self.P[root_key][action] = (1 - self.eps) * self.P[root_key][
+                action
+            ] + self.eps * dirichlet_noise[i]
+
+        # シミュレーション実行
+        for sim in range(num_simulations):
+            # ルートからの探索を開始 (コピーを使用)
+            leaf_value = self._evaluate(root_game.copy())
+            print(root_game)
+            if self.debug:
+                self._log_root_stats(root_key, valid_actions, sim + 1, num_simulations, leaf_value)
+
+        # 訪問回数に基づいたPolicyを返す
+        root_visits = sum(self.N[root_key].values())
+        if root_visits == 0:
+            # 万が一訪問が0回の場合(通常ありえないが)は一様分布を返す
+            return {a: 1.0 / len(valid_actions) for a in valid_actions}, {}
+
+        mcts_policy = {a: self.N[root_key][a] / root_visits for a in valid_actions}
+
+        # 各アクションの評価値 (Q値) を計算
+        action_values = self._compute_action_values(root_key, valid_actions)
+
+        if self.debug:
+            self._log_root_summary(root_key, valid_actions, action_values)
+
+        return mcts_policy, action_values
+
+    def _evaluate(self, game: ContrastGame):
+        """
+       再帰的な探索関数
+        """
+        key = self.game_to_key(game)
+
+        # 1. ゲーム終了判定
+        if game.game_over:
+            if game.winner == 0:  # Draw
+                return 0
+            # current_playerが勝者なら1, 敗者なら-1
+            # 注意: evaluateに入った時点の手番プレイヤー視点での価値
+            return 1 if game.winner == game.current_player else -1
+
+        # 2. 未展開ノードなら展開して値を返す
+        if key not in self.P:
+            value = self._expand(game)
+            return value
+
+        # 3. 展開済みならPUCTでアクション選択
+        valid_actions = list(self.P[key].keys())
+
+        if not valid_actions:
+            # 展開済みだが合法手がない（ゲーム終了扱い漏れなど）
+            return 0
+
+        sum_n = sum(self.N[key].values())
+        sqrt_sum_n = math.sqrt(sum_n)
+
+        best_score = -float("inf")
+        best_action = -1
+
+        for action in valid_actions:
+            p = self.P[key][action]
+            n = self.N[key][action]
+            w = self.W[key][action]
+
+            q = w / n if n > 0 else 0
+            u = self.c_puct * p * sqrt_sum_n / (1 + n)
+
+            score = q + u
+
+            if score > best_score:
+                best_score = score
+                best_action = action
+
+        # 4. 次の状態へ遷移 & 再帰 (Simulation step)
+        # 以前の修正: 引数を1つにする
+        game.step(best_action)
+
+        # 相手の手番での価値が返ってくるため反転させる
+        v = -self._evaluate(game)
+
+        # 5. バックプロパゲーション
+        self.W[key][best_action] += v
+        self.N[key][best_action] += 1
+
+        return v
+
+    def _expand(self, game):
+        """
+        ニューラルネットで推論し、Prior ProbabilityとValueを計算して保存する
+        """
+        key = self.game_to_key(game)
+
+        # encode_state内でP2なら自動的に反転される
+        input_tensor = (
+            torch.from_numpy(game.encode_state()).unsqueeze(0).to(self.device)
+        )
+
+        self.network.eval()
+        with torch.no_grad():
+            move_logits, tile_logits, value = self.network(input_tensor)
+
+        value = value.item()
+
+        legal_actions = game.get_all_legal_actions()
+
+        if not legal_actions:
+            self.P[key] = {}
+            self.N[key] = {}
+            self.W[key] = {}
+            return value
+
+        m_logits = move_logits[0].cpu().numpy()
+        t_logits = tile_logits[0].cpu().numpy()
+
+        temp_logits = []
+        action_mapping = []
+
+        # P2の場合は、実アクション(legal_actions)を「反転」させてから
+        # ネットワークの出力(反転済みの盤面に対する推論)を参照する
+        should_flip = game.current_player == P2
+
+        for action_hash in legal_actions:
+            # ネットワークに問い合わせるためのハッシュ
+            query_hash = flip_action(action_hash) if should_flip else action_hash
+
+            # デコード (51 = ContrastGame.ACTION_SIZE_TILE)
+            move_idx = query_hash // 51
+            tile_idx = query_hash % 51
+
+            combined_logit = m_logits[move_idx] + t_logits[tile_idx]
+            temp_logits.append(combined_logit)
+            action_mapping.append(action_hash)  # 辞書には実ハッシュを保存
+
+        temp_logits = np.array(temp_logits)
+        probs = F.softmax(torch.tensor(temp_logits), dim=0).numpy()
+
+        self.P[key] = {}
+        self.N[key] = {}
+        self.W[key] = {}
+
+        for action_hash, prob in zip(action_mapping, probs):
+            self.P[key][action_hash] = prob
+            self.N[key][action_hash] = 0
+            self.W[key][action_hash] = 0
+
+        return value
+
+    def _compute_action_values(self, key, actions):
+        values = {}
+        for action in actions:
+            n = self.N[key][action]
+            values[action] = self.W[key][action] / n if n > 0 else 0.0
+        return values
+
+    def _log_root_stats(self, root_key, actions, sim_idx, total_sims, leaf_value):
+        root_visits = sum(self.N[root_key].values())
+        print(
+            f"[MCTS][sim {sim_idx}/{total_sims}] leaf_value={leaf_value:.3f} total_visits={root_visits}"
+        )
+        for action in actions[: min(5, len(actions))]:
+            n = self.N[root_key][action]
+            w = self.W[root_key][action]
+            p = self.P[root_key][action]
+            q = w / n if n > 0 else 0.0
+            print(
+                f"    action {action}: N={n}, W={w:.3f}, Q={q:.3f}, P={p:.3f}"
+            )
+
+    def _log_root_summary(self, root_key, actions, action_values):
+        root_visits = sum(self.N[root_key].values())
+        print(f"[MCTS] completed search with {root_visits} visits")
+        sorted_actions = sorted(
+            actions,
+            key=lambda a: self.N[root_key][a],
+            reverse=True,
+        )
+        for action in sorted_actions[: min(5, len(sorted_actions))]:
+            print(
+                f"    action {action}: N={self.N[root_key][action]}, Q={action_values[action]:.3f}, P={self.P[root_key][action]:.3f}"
+            )

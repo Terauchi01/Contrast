@@ -107,7 +107,14 @@ make gui_play -j4
 
 ## AIについて
 
-このGUIは、N-tuple Networkを使って学習したAIと対戦できます。
+このGUIは複数種類のAIと対戦できます。
+
+- **Greedy**: ローカル評価で即時の得を狙うシンプル方策
+- **RuleBased**: 旧来のヒューリスティックベースAI
+- **RuleBasedPolicy2**: 6段階の戦術（パリティ制御、列破壊など）を実装した最新版ルールベースAI
+- **N-tuple Network**: 学習済み重み `ntuple_weights_vs_greedy.bin.100000` を読み込み、局所パターン評価で手を選択
+
+N-tuple AIに関する詳細:
 
 - **使用する重みファイル**: `ntuple_weights_vs_greedy.bin.100000`
 - **学習方法**: Greedy方策と10万ゲーム対戦して学習

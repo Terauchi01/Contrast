@@ -6,6 +6,31 @@
 #include <random>
 #include <string>
 
+// ============================================================================
+// N-tupleエンコード方式の選択
+// ============================================================================
+// 
+// 2種類のエンコード方式から選択してください：
+//
+// 【方式1: 完全分離版 (SEPARATE_ENCODING)】
+//   - 駒(3値) + タイル(3値) + 手持ち を完全分離
+//   - メリット: メモリ使用量が劇的に少ない（~4MB）
+//   - デメリット: 駒とタイルの相互作用を直接学習できない
+//   - 推奨: 初期学習やメモリ制約がある場合
+//
+// 【方式2: 部分結合版 (SEPARATE_ENCODINGをコメントアウト)】
+//   - 駒×タイル(9値) + 手持ち を結合
+//   - メリット: 駒とタイルの相互作用を直接学習できる
+//   - デメリット: メモリ使用量が多い（~220GB）
+//   - 推奨: 十分なメモリがあり、より高精度な評価が必要な場合
+//
+// 切り替え方法:
+//   完全分離版を使う場合: 下の行をそのまま有効にする
+//   部分結合版を使う場合: 下の行をコメントアウト（// を追加）
+// ============================================================================
+
+#define SEPARATE_ENCODING  // ← この行をコメントアウトで切り替え
+
 namespace contrast_ai {
 
 /**
@@ -26,14 +51,22 @@ struct NTuple {
   
   // 盤面をこのパターンのインデックスに変換
   // offset: パターンを盤面上で移動させる場合のオフセット
-  long long to_index(const contrast::Board& board, int offset_x, int offset_y) const;
+  long long to_index(const contrast::Board& board, int offset_x, int offset_y,
+                     contrast::Player current_player) const;
   
-  // このパターンが取りうる状態の総数を計算（9^num_cells）
+  // このパターンが取りうる状態の総数を計算
   long long num_states() const;
   
-  // 1セルの状態を0-8の整数にエンコード
-  // (occupant, tile) → 単一の整数値
-  static int encode_cell(const contrast::Cell& c);
+  // セルの状態をエンコード
+#ifdef SEPARATE_ENCODING
+  // 完全分離版: 駒のみ (0=Empty, 1=My, 2=Opp)
+  static int encode_cell_piece(const contrast::Cell& c, contrast::Player current_player);
+  // タイルのみ (0=None, 1=Black, 2=Gray)
+  static int encode_cell_tile(const contrast::Cell& c);
+#else
+  // 部分結合版: 駒×タイル (0-8の9値)
+  static int encode_cell(const contrast::Cell& c, contrast::Player current_player);
+#endif
 };
 
 /**
@@ -83,14 +116,24 @@ public:
   size_t num_weights() const;
   
 private:
-  std::vector<NTuple> tuples_;              // 使用するパターンのリスト
+  std::vector<NTuple> tuples_;              // 駒配置用パターンのリスト
   std::vector<std::vector<float>> weights_; // 各パターンの重みテーブル
+  std::vector<float> hand_weights_;         // 手持ちタイル評価テーブル
   
-  // パターンの初期化（現在は3x3を1つ定義）
+#ifdef SEPARATE_ENCODING
+  std::vector<NTuple> tile_tuples_;              // タイル配置用パターン（完全分離版のみ）
+  std::vector<std::vector<float>> tile_weights_; // タイルパターンの重みテーブル
+#endif
+  
+  // パターンの初期化
   void init_tuples();
   
+  // 手持ちからインデックスを計算 (0-7)
+  static int hand_index(int black_remain, int gray_remain);
+  
   // 盤面から特徴インデックスを抽出（内部用）
-  std::vector<int> extract_features(const contrast::Board& board) const;
+  std::vector<int> extract_features(const contrast::Board& board, 
+                                    contrast::Player current_player) const;
 };
 
 /**
