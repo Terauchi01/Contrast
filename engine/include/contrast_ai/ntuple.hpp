@@ -115,6 +115,9 @@ public:
   // 重みの総数を取得（デバッグ用）
   size_t num_weights() const;
   
+  // パターン情報を取得（デバッグ・可視化用）
+  const std::vector<NTuple>& get_tuples() const { return tuples_; }
+  
 private:
   std::vector<NTuple> tuples_;              // 駒配置用パターンのリスト
   std::vector<std::vector<float>> weights_; // 各パターンの重みテーブル

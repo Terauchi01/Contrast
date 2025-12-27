@@ -17,22 +17,56 @@
 #include <queue>
 #include <fstream>
 #include <cstdlib>
+#include <set>
 
 using namespace contrast;
 using namespace contrast_ai;
 
 /**
+ * N-tupleパターンを視覚的に表示
+ */
+void print_ntuple_pattern(const NTuple& pattern, int index) {
+    std::set<int> cells;
+    for (size_t i = 0; i < pattern.num_cells; ++i) {
+        cells.insert(pattern.cell_indices[i]);
+    }
+    
+    std::cout << "  Pattern #" << std::setw(2) << index << " (" << pattern.num_cells << " cells): [";
+    for (size_t i = 0; i < pattern.num_cells; ++i) {
+        if (i > 0) std::cout << ",";
+        std::cout << std::setw(2) << pattern.cell_indices[i];
+    }
+    std::cout << "]\n";
+    
+    // 盤面表示（5x5）
+    for (int y = 0; y < 5; ++y) {
+        std::cout << "    ";
+        for (int x = 0; x < 5; ++x) {
+            int cell = y * 5 + x;
+            if (cells.count(cell)) {
+                std::cout << "■ ";
+            } else {
+                std::cout << "□ ";
+            }
+        }
+        std::cout << "\n";
+    }
+}
+
+/**
  * 学習の設定パラメータ
  */
 struct TrainingConfig {
-    int num_games = 10000;
-    float learning_rate = 0.01f;
-    float exploration_rate = 0.1f;
-    float opponent_exploration_rate = 0.0f;  // 対戦相手の探索率(0.0=greedy)
-    int save_interval = 1000;
-    int num_worker_threads = 4;  // ゲームプレイ用のワーカースレッド数
-    std::string save_path = "ntuple_weights.bin";
-    std::string load_path = "";
+    int num_games = 10000;              // 総学習ゲーム数
+    long long num_turns = 0;            // 総学習ターン数（TD更新回数, 0=未使用）
+    float learning_rate = 0.01f;        // 学習率（実際は動的に変化）
+    float discount_factor = 0.9f;       // 割引率（現在は未使用、TD(0)のため）
+    float exploration_rate = 0.1f;      // ε-greedy の探索率
+    int save_interval = 1000;           // チェックポイント保存間隔
+    int num_worker_threads = 4;         // ゲームプレイ用のワーカースレッド数
+    std::string save_path = "ntuple_weights.bin";  // 保存先パス
+    std::string load_path = "";         // 事前学習済み重みの読み込み元（オプション）
+    std::string opponent = "self";      // 対戦相手: "self"=前回の自分, "greedy"=Greedy, "rulebased"=RuleBased
 };
 
 /**
@@ -43,6 +77,27 @@ struct GameResult {
     std::vector<Player> players;
     Player winner;
     int num_moves;
+};
+
+/**
+ * 対戦相手の状態を保持する構造体（並列処理用）
+ */
+struct OpponentState {
+    std::string type;  // "self", "greedy", "rulebased"
+    NTupleNetwork snapshot;  // self対戦時の前回スナップショット
+    mutable std::mutex mutex_;  // スナップショット更新用のmutex
+    
+    OpponentState(const std::string& t) : type(t) {}
+    
+    void update_snapshot(const NTupleNetwork& network) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshot = network;
+    }
+    
+    NTupleNetwork get_snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return snapshot;
+    }
 };
 
 /**
@@ -136,6 +191,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return network_.num_weights();
     }
+    
+    // ネットワークのコピーを取得（スナップショット用）
+    NTupleNetwork get_network() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return network_;
+    }
 };
 
 /**
@@ -149,7 +210,7 @@ float calculate_learning_rate(int current_game, int total_games, float lr_max = 
 }
 
 /**
- * ε-greedy法による手の選択
+ * ε-greedy法による手の選択（SharedNTupleNetwork用）
  */
 Move select_move_epsilon_greedy(
     const GameState& state,
@@ -191,18 +252,73 @@ Move select_move_epsilon_greedy(
 }
 
 /**
- * 学習用に1ゲームをプレイして軌跡を記録
- * 学習プレイヤー(Black)と対戦相手(White)で異なる探索率を使用
+ * ε-greedy法による手の選択（NTupleNetwork用、オーバーロード）
+ */
+Move select_move_epsilon_greedy(
+    const GameState& state,
+    const NTupleNetwork& network,
+    float epsilon,
+    std::mt19937& rng
+) {
+    MoveList moves;
+    Rules::legal_moves(state, moves);
+    
+    if (moves.empty()) {
+        return Move{};
+    }
+    
+    // Exploration: random move
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    if (dist(rng) < epsilon) {
+        std::uniform_int_distribution<int> move_dist(0, static_cast<int>(moves.size - 1));
+        return moves[move_dist(rng)];
+    }
+    
+    // Exploitation: best move according to network
+    Move best_move = moves[0];
+    float best_value = -std::numeric_limits<float>::infinity();
+    
+    for (const auto& move : moves) {
+        GameState next_state = state;
+        next_state.apply_move(move);
+        // Negamax: opponent's value = -our value
+        float value = -network.evaluate(next_state);
+        
+        if (value > best_value) {
+            best_value = value;
+            best_move = move;
+        }
+    }
+    
+    return best_move;
+}
+
+/**
+ * 学習用に1ゲームをプレイして軌跡を記録（並列処理用）
+ * 対戦相手のタイプに応じて異なる戦略を使用
  */
 GameResult play_training_game(
     const SharedNTupleNetwork& network,
-    float learner_epsilon,      // 学習プレイヤー(Black)の探索率
-    float opponent_epsilon,     // 対戦相手(White)の探索率
+    OpponentState& opponent_state,
+    float learner_epsilon,
     std::mt19937& rng
 ) {
     GameResult result;
     GameState state;
     state.reset();
+    
+    // 対戦相手のネットワークまたはポリシーを準備
+    NTupleNetwork opponent_network;
+    std::unique_ptr<GreedyPolicy> greedy_policy;
+    std::unique_ptr<RuleBasedPolicy> rulebased_policy;
+    
+    if (opponent_state.type == "self") {
+        opponent_network = opponent_state.get_snapshot();
+    } else if (opponent_state.type == "greedy") {
+        greedy_policy = std::make_unique<GreedyPolicy>();
+    } else if (opponent_state.type == "rulebased") {
+        rulebased_policy = std::make_unique<RuleBasedPolicy>();
+    }
     
     const int MAX_MOVES = 500;
     int move_count = 0;
@@ -217,7 +333,6 @@ GameResult play_training_game(
         Rules::legal_moves(state, moves);
         
         if (moves.empty()) {
-            // No legal moves - opponent wins
             result.winner = (state.current_player() == Player::Black) 
                 ? Player::White : Player::Black;
             result.num_moves = move_count;
@@ -236,10 +351,23 @@ GameResult play_training_game(
             return result;
         }
         
-        // Select and apply move with appropriate exploration rate
-        float current_epsilon = (state.current_player() == Player::Black) 
-            ? learner_epsilon : opponent_epsilon;
-        Move move = select_move_epsilon_greedy(state, network, current_epsilon, rng);
+        // Select move based on player
+        Move move;
+        if (state.current_player() == Player::Black) {
+            // 学習プレイヤー（Black）: ε-greedy
+            move = select_move_epsilon_greedy(state, network, learner_epsilon, rng);
+        } else {
+            // 対戦相手（White）: タイプに応じた戦略
+            if (opponent_state.type == "self") {
+                // 前回のネットワーク（greedy）
+                move = select_move_epsilon_greedy(state, opponent_network, 0.0f, rng);
+            } else if (opponent_state.type == "greedy") {
+                move = greedy_policy->pick(state);
+            } else if (opponent_state.type == "rulebased") {
+                move = rulebased_policy->pick(state);
+            }
+        }
+        
         state.apply_move(move);
         move_count++;
     }
@@ -256,11 +384,11 @@ GameResult play_training_game(
 void worker_thread(
     int worker_id,
     SharedNTupleNetwork& network,
+    OpponentState& opponent_state,
     GameResultQueue& result_queue,
     std::atomic<int>& games_completed,
     int target_games,
-    float learner_epsilon,      // 学習プレイヤー(Black)の探索率
-    float opponent_epsilon      // 対戦相手(White)の探索率
+    float learner_epsilon
 ) {
     std::mt19937 rng(std::random_device{}() + worker_id);
     
@@ -275,11 +403,10 @@ void worker_thread(
             break;
         }
         
-        // Debug: Measure game play time
         auto game_start = std::chrono::steady_clock::now();
         
         // Play game
-        GameResult result = play_training_game(network, learner_epsilon, opponent_epsilon, rng);
+        GameResult result = play_training_game(network, opponent_state, learner_epsilon, rng);
         
         auto game_end = std::chrono::steady_clock::now();
         auto game_duration = std::chrono::duration_cast<std::chrono::milliseconds>(game_end - game_start).count();
@@ -313,8 +440,10 @@ void worker_thread(
  */
 void updater_thread(
     SharedNTupleNetwork& network,
+    OpponentState& opponent_state,
     GameResultQueue& result_queue,
     std::atomic<int>& games_processed,
+    std::atomic<long long>& turns_processed,
     int total_games,
     const TrainingConfig& config
 ) {
@@ -324,6 +453,7 @@ void updater_thread(
     int white_wins = 0;
     int draws = 0;
     float total_moves = 0;
+    int last_snapshot_game = 0;
     
     auto start_time = std::chrono::steady_clock::now();
     auto last_report_time = start_time;
@@ -370,6 +500,21 @@ void updater_thread(
             num_updates++;
         }
         
+        // ターン数（TD更新回数）をカウント
+        turns_processed.fetch_add(num_updates);
+        
+        // Self対戦の場合、定期的に対戦相手のネットワークを更新
+        if (config.opponent == "self" && current_game - last_snapshot_game >= 100) {
+            opponent_state.update_snapshot(network.get_network());
+            last_snapshot_game = current_game;
+        }
+        
+        // ターン数での学習停止チェック
+        if (config.num_turns > 0 && turns_processed.load() >= config.num_turns) {
+            std::cout << "[Updater] Reached target turns: " << turns_processed.load() << "\n";
+            break;
+        }
+        
         // Measure update time
         auto update_end = std::chrono::steady_clock::now();
         auto update_time = std::chrono::duration_cast<std::chrono::milliseconds>(update_end - update_start).count();
@@ -404,8 +549,11 @@ void updater_thread(
             float learner_win_rate = (decided_games > 0) ? 
                 100.0f * black_wins / decided_games : 0.0f;
             
-            std::cout << "[Updater] Game " << std::setw(6) << current_game << "/" << total_games
-                      << " | Learner:" << std::setw(5) << std::setprecision(1) << std::fixed << learner_win_rate << "%"
+            std::cout << "[Updater] Game " << std::setw(6) << current_game << "/" << total_games;
+            if (config.num_turns > 0) {
+                std::cout << " | Turns " << turns_processed.load() << "/" << config.num_turns;
+            }
+            std::cout << " | Learner:" << std::setw(5) << std::setprecision(1) << std::fixed << learner_win_rate << "%"
                       << " | B:" << std::setw(5) << black_wins << " (" << std::setw(5) << std::setprecision(1) << black_win_rate << "%)"
                       << " W:" << std::setw(5) << white_wins << " (" << std::setw(5) << std::setprecision(1) << white_win_rate << "%)"
                       << " D:" << std::setw(4) << draws << " (" << std::setw(4) << std::setprecision(1) << draw_rate << "%)"
@@ -429,6 +577,12 @@ void updater_thread(
             std::string checkpoint_path = config.save_path + "." + std::to_string(current_game);
             network.save(checkpoint_path);
             std::cout << "[Updater] Saved checkpoint: " << checkpoint_path << "\n";
+            
+            // Self対戦の場合、チェックポイント保存時にも対戦相手を更新
+            if (config.opponent == "self") {
+                opponent_state.update_snapshot(network.get_network());
+                last_snapshot_game = current_game;
+            }
         }
     }
     
@@ -453,6 +607,7 @@ void updater_thread(
  */
 void train_network_parallel(const TrainingConfig& config) {
     SharedNTupleNetwork network;
+    OpponentState opponent_state(config.opponent);
     
     // Load existing weights if specified
     if (!config.load_path.empty()) {
@@ -466,6 +621,11 @@ void train_network_parallel(const TrainingConfig& config) {
         }
     }
     
+    // Self対戦の場合、初期スナップショットを作成
+    if (config.opponent == "self") {
+        opponent_state.update_snapshot(network.get_network());
+    }
+    
     // Automatically set save_interval
     int actual_save_interval = config.save_interval;
     if (config.save_interval == 1000) {
@@ -477,16 +637,32 @@ void train_network_parallel(const TrainingConfig& config) {
     adjusted_config.save_interval = actual_save_interval;
     
     std::cout << "\n=== Parallel N-tuple Network Training ===\n";
-    std::cout << "Configuration:\n";
-    std::cout << "  Games: " << config.num_games << "\n";
+    
+    // N-tupleネットワークの詳細情報を表示
+    std::cout << "\nN-tuple Network Information:\n";
+    std::cout << "  Number of tuples: " << network.num_tuples() << "\n";
+    std::cout << "  Total weights: " << network.num_weights() << "\n";
+    std::cout << "  Memory usage: " << (network.num_weights() * sizeof(float) / (1024.0 * 1024.0)) << " MB\n\n";
+    
+    // パターンを視覚的に表示
+    std::cout << "N-tuple Patterns:\n";
+    NTupleNetwork temp_network = network.get_network();
+    const auto& tuples = temp_network.get_tuples();
+    for (size_t i = 0; i < tuples.size(); ++i) {
+        print_ntuple_pattern(tuples[i], i + 1);
+    }
+    std::cout << "\n";
+    
+    std::cout << "\nTraining Configuration:\n";
+    std::cout << "  Games: " << config.num_games;
+    if (config.num_turns > 0) {
+        std::cout << " (or until " << config.num_turns << " turns)";
+    }
+    std::cout << "\n";
     std::cout << "  Worker threads: " << config.num_worker_threads << "\n";
     std::cout << "  Learning rate schedule: 0.1 -> 0.005 (inverse-square decay)\n";
     std::cout << "  Learner exploration rate (Black): " << config.exploration_rate << "\n";
-    std::cout << "  Opponent exploration rate (White): " << config.opponent_exploration_rate;
-    if (config.opponent_exploration_rate == 0.0f) {
-        std::cout << " (greedy)";
-    }
-    std::cout << "\n";
+    std::cout << "  Opponent type: " << config.opponent << "\n";
     std::cout << "  Save interval: " << actual_save_interval << "\n";
     std::cout << "  Save path: " << config.save_path << "\n\n";
     
@@ -494,19 +670,21 @@ void train_network_parallel(const TrainingConfig& config) {
     GameResultQueue result_queue;
     std::atomic<int> games_completed(0);
     std::atomic<int> games_processed(0);
+    std::atomic<long long> turns_processed(0);
     
     auto start_time = std::chrono::steady_clock::now();
     
     // Start updater thread
-    std::thread updater(updater_thread, std::ref(network), std::ref(result_queue), 
-                        std::ref(games_processed), config.num_games, std::cref(adjusted_config));
+    std::thread updater(updater_thread, std::ref(network), std::ref(opponent_state),
+                        std::ref(result_queue), std::ref(games_processed), 
+                        std::ref(turns_processed), config.num_games, std::cref(adjusted_config));
     
     // Start worker threads
     std::vector<std::thread> workers;
     for (int i = 0; i < config.num_worker_threads; ++i) {
-        workers.emplace_back(worker_thread, i, std::ref(network), std::ref(result_queue),
-                             std::ref(games_completed), config.num_games, 
-                             config.exploration_rate, config.opponent_exploration_rate);
+        workers.emplace_back(worker_thread, i, std::ref(network), std::ref(opponent_state),
+                             std::ref(result_queue), std::ref(games_completed), 
+                             config.num_games, config.exploration_rate);
     }
     
     // Wait for all workers to finish
@@ -546,10 +724,14 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "--games" && i + 1 < argc) {
             config.num_games = std::stoi(argv[++i]);
+        } else if (arg == "--turns" && i + 1 < argc) {
+            config.num_turns = std::stoll(argv[++i]);
+        } else if (arg == "--lr" && i + 1 < argc) {
+            config.learning_rate = std::stof(argv[++i]);
+        } else if (arg == "--discount" && i + 1 < argc) {
+            config.discount_factor = std::stof(argv[++i]);
         } else if (arg == "--epsilon" && i + 1 < argc) {
             config.exploration_rate = std::stof(argv[++i]);
-        } else if (arg == "--opponent-epsilon" && i + 1 < argc) {
-            config.opponent_exploration_rate = std::stof(argv[++i]);
         } else if (arg == "--threads" && i + 1 < argc) {
             config.num_worker_threads = std::stoi(argv[++i]);
         } else if (arg == "--save-interval" && i + 1 < argc) {
@@ -558,50 +740,26 @@ int main(int argc, char* argv[]) {
             config.save_path = argv[++i];
         } else if (arg == "--load" && i + 1 < argc) {
             config.load_path = argv[++i];
+        } else if (arg == "--opponent" && i + 1 < argc) {
+            config.opponent = argv[++i];
         } else if (arg == "--help") {
             std::cout << "Usage: " << argv[0] << " [options]\n";
             std::cout << "Options:\n";
-            std::cout << "  --games N              Number of training games (default: 10000)\n";
-            std::cout << "  --epsilon EPS          Learner's exploration rate (default: 0.1)\n";
-            std::cout << "  --opponent-epsilon EPS Opponent's exploration rate (default: 0.1, use 0.0 for greedy)\n";
-            std::cout << "  --threads N            Number of worker threads (default: 4)\n";
-            std::cout << "  --save-interval N      Save checkpoint every N games (default: auto)\n";
-            std::cout << "  --output PATH          Output file path (default: ntuple_weights.bin)\n";
-            std::cout << "  --load PATH            Load existing weights before training\n";
-            std::cout << "  --help                 Show this help message\n";
+            std::cout << "  --games N          Number of training games (default: 10000)\n";
+            std::cout << "  --turns N          Number of TD updates (state updates). If set, training stops when turns reached.\n";
+            std::cout << "  --lr RATE          Learning rate (default: 0.01, actual rate is dynamic)\n";
+            std::cout << "  --discount GAMMA   Discount factor (default: 0.9)\n";
+            std::cout << "  --epsilon EPS      Exploration rate (default: 0.1)\n";
+            std::cout << "  --threads N        Number of worker threads (default: 4)\n";
+            std::cout << "  --save-interval N  Save checkpoint every N games (default: auto)\n";
+            std::cout << "  --output PATH      Output file path (default: ntuple_weights.bin)\n";
+            std::cout << "  --load PATH        Load existing weights before training\n";
+            std::cout << "  --opponent TYPE    Opponent type: 'self', 'greedy', or 'rulebased' (default: self)\n";
+            std::cout << "  --help             Show this help message\n";
             return 0;
         }
     }
     
-    // Determine output directory: prefer environment variable TRAIN_OUTPUT_DIR,
-    // otherwise default to /home/matsu-lab/terauchi (HDD directory requested by user).
-    const char* env_out = std::getenv("TRAIN_OUTPUT_DIR");
-    std::string default_dir = "/home/matsu-lab/terauchi";
-    std::string out_dir = env_out ? std::string(env_out) : default_dir;
-
-    // If user didn't provide --output, set default save path under out_dir
-    if (config.save_path.empty() || config.save_path == "ntuple_weights.bin") {
-        config.save_path = out_dir + "/ntuple_weights.bin";
-    }
-
-    // Setup log file: prefer TRAIN_LOG_DIR, else use the same out_dir
-    const char* env_log = std::getenv("TRAIN_LOG_DIR");
-    std::string log_dir = env_log ? std::string(env_log) : out_dir;
-    std::string log_path = log_dir + "/train_parallel.log";
-
-    static std::ofstream log_stream;
-    log_stream.open(log_path, std::ios::out | std::ios::app);
-    if (log_stream) {
-        // Inform user on stdout before redirecting (so it appears in terminal)
-        std::cout << "Redirecting logs to: " << log_path << "\n";
-        std::cout.flush();
-        // Redirect cout/cerr to log file so runtime logs are saved
-        std::cout.rdbuf(log_stream.rdbuf());
-        std::cerr.rdbuf(log_stream.rdbuf());
-    } else {
-        std::cerr << "Warning: failed to open log file: " << log_path << "\n";
-    }
-
     train_network_parallel(config);
     return 0;
 }

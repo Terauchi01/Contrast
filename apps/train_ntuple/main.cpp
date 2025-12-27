@@ -10,9 +10,41 @@
 #include <iomanip>
 #include <deque>
 #include <algorithm>
+#include <set>
 
 using namespace contrast;
 using namespace contrast_ai;
+
+/**
+ * N-tupleパターンを視覚的に表示
+ */
+void print_ntuple_pattern(const NTuple& pattern, int index) {
+    std::set<int> cells;
+    for (size_t i = 0; i < pattern.num_cells; ++i) {
+        cells.insert(pattern.cell_indices[i]);
+    }
+    
+    std::cout << "  Pattern #" << std::setw(2) << index << " (" << pattern.num_cells << " cells): [";
+    for (size_t i = 0; i < pattern.num_cells; ++i) {
+        if (i > 0) std::cout << ",";
+        std::cout << std::setw(2) << pattern.cell_indices[i];
+    }
+    std::cout << "]\n";
+    
+    // 盤面表示（5x5）
+    for (int y = 0; y < 5; ++y) {
+        std::cout << "    ";
+        for (int x = 0; x < 5; ++x) {
+            int cell = y * 5 + x;
+            if (cells.count(cell)) {
+                std::cout << "■ ";
+            } else {
+                std::cout << "□ ";
+            }
+        }
+        std::cout << "\n";
+    }
+}
 
 /**
  * 学習の設定パラメータ
@@ -400,8 +432,8 @@ void initialize_opponent(OpponentState& opp, const std::string& opponent_type) {
  * 学習設定を表示
  */
 void print_training_config(const TrainingConfig& config, int actual_save_interval) {
-    std::cout << "Starting N-tuple network training\n";
-    std::cout << "Configuration:\n";
+    std::cout << "\n=== N-tuple Network Training ===\n";
+    std::cout << "\nConfiguration:\n";
     std::cout << "  Opponent: " << config.opponent << "\n";
     if (config.num_turns > 0) {
         std::cout << "  Turns: " << config.num_turns << " (TD updates)\n";
@@ -607,6 +639,19 @@ void train_network(const TrainingConfig& config) {
     
     OpponentState opp;
     initialize_opponent(opp, config.opponent);
+    
+    // N-tupleネットワークの詳細情報とパターンを表示
+    std::cout << "\nN-tuple Network Information:\n";
+    std::cout << "  Number of tuples: " << network.num_tuples() << "\n";
+    std::cout << "  Total weights: " << network.num_weights() << "\n";
+    std::cout << "  Memory usage: " << (network.num_weights() * sizeof(float) / (1024.0 * 1024.0)) << " MB\n\n";
+    
+    std::cout << "N-tuple Patterns:\n";
+    const auto& tuples = network.get_tuples();
+    for (size_t i = 0; i < tuples.size(); ++i) {
+        print_ntuple_pattern(tuples[i], i + 1);
+    }
+    std::cout << "\n";
     
     print_training_config(config, actual_save_interval);
     
