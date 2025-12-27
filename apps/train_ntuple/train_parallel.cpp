@@ -64,7 +64,7 @@ struct TrainingConfig {
     float exploration_rate = 0.1f;      // ε-greedy の探索率
     int save_interval = 1000;           // チェックポイント保存間隔
     int num_worker_threads = 4;         // ゲームプレイ用のワーカースレッド数
-    std::string save_path = "ntuple_weights.bin";  // 保存先パス
+    std::string save_path = "../bin/ntuple_weights.bin";  // 保存先パス
     std::string load_path = "";         // 事前学習済み重みの読み込み元（オプション）
     std::string opponent = "self";      // 対戦相手: "self"=前回の自分, "greedy"=Greedy, "rulebased"=RuleBased
 };
@@ -84,19 +84,26 @@ struct GameResult {
  */
 struct OpponentState {
     std::string type;  // "self", "greedy", "rulebased"
-    NTupleNetwork snapshot;  // self対戦時の前回スナップショット
+    std::unique_ptr<NTupleNetwork> snapshot;  // self対戦時の前回スナップショット
     mutable std::mutex mutex_;  // スナップショット更新用のmutex
     
-    OpponentState(const std::string& t) : type(t) {}
+    OpponentState(const std::string& t) : type(t), snapshot(nullptr) {}
     
     void update_snapshot(const NTupleNetwork& network) {
         std::lock_guard<std::mutex> lock(mutex_);
-        snapshot = network;
+        if (!snapshot) {
+            snapshot = std::make_unique<NTupleNetwork>(network);
+        } else {
+            *snapshot = network;
+        }
     }
     
     NTupleNetwork get_snapshot() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return snapshot;
+        if (snapshot) {
+            return *snapshot;
+        }
+        return NTupleNetwork(); // デフォルト（通常は呼ばれない）
     }
 };
 
@@ -308,12 +315,12 @@ GameResult play_training_game(
     state.reset();
     
     // 対戦相手のネットワークまたはポリシーを準備
-    NTupleNetwork opponent_network;
+    std::unique_ptr<NTupleNetwork> opponent_network;  // ポインタに変更
     std::unique_ptr<GreedyPolicy> greedy_policy;
     std::unique_ptr<RuleBasedPolicy> rulebased_policy;
     
     if (opponent_state.type == "self") {
-        opponent_network = opponent_state.get_snapshot();
+        opponent_network = std::make_unique<NTupleNetwork>(opponent_state.get_snapshot());
     } else if (opponent_state.type == "greedy") {
         greedy_policy = std::make_unique<GreedyPolicy>();
     } else if (opponent_state.type == "rulebased") {
@@ -360,7 +367,7 @@ GameResult play_training_game(
             // 対戦相手（White）: タイプに応じた戦略
             if (opponent_state.type == "self") {
                 // 前回のネットワーク（greedy）
-                move = select_move_epsilon_greedy(state, opponent_network, 0.0f, rng);
+                move = select_move_epsilon_greedy(state, *opponent_network, 0.0f, rng);
             } else if (opponent_state.type == "greedy") {
                 move = greedy_policy->pick(state);
             } else if (opponent_state.type == "rulebased") {
