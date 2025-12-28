@@ -18,6 +18,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <set>
+#include <limits>
 
 using namespace contrast;
 using namespace contrast_ai;
@@ -615,7 +616,7 @@ void updater_thread(
 void train_network_parallel(const TrainingConfig& config) {
     SharedNTupleNetwork network;
     OpponentState opponent_state(config.opponent);
-    
+
     // Load existing weights if specified
     if (!config.load_path.empty()) {
         std::cout << "Loading existing weights from: " << config.load_path << "\n";
@@ -644,12 +645,22 @@ void train_network_parallel(const TrainingConfig& config) {
     adjusted_config.save_interval = actual_save_interval;
     
     std::cout << "\n=== Parallel N-tuple Network Training ===\n";
-    
+
     // N-tupleネットワークの詳細情報を表示
     std::cout << "\nN-tuple Network Information:\n";
     std::cout << "  Number of tuples: " << network.num_tuples() << "\n";
     std::cout << "  Total weights: " << network.num_weights() << "\n";
-    std::cout << "  Memory usage: " << (network.num_weights() * sizeof(float) / (1024.0 * 1024.0)) << " MB\n\n";
+
+    // メモリ使用量（重み配列分のみ）: bytes / MiB / GiB を一貫して表示
+    const long double weight_bytes_ld =
+        static_cast<long double>(network.num_weights()) * static_cast<long double>(sizeof(float));
+    const long double mib = weight_bytes_ld / (1024.0L * 1024.0L);
+    const long double gib = weight_bytes_ld / (1024.0L * 1024.0L * 1024.0L);
+
+    std::cout << "  Memory usage (weights only): "
+              << static_cast<unsigned long long>(weight_bytes_ld) << " bytes ("
+              << std::fixed << std::setprecision(2)
+              << mib << " MiB, " << gib << " GiB)\n\n";
     
     // パターンを視覚的に表示
     std::cout << "N-tuple Patterns:\n";
