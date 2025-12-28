@@ -19,6 +19,8 @@
 #include <cstdlib>
 #include <set>
 #include <limits>
+#include <memory>
+#include <vector>
 
 using namespace contrast;
 using namespace contrast_ai;
@@ -85,26 +87,20 @@ struct GameResult {
  */
 struct OpponentState {
     std::string type;  // "self", "greedy", "rulebased"
-    std::unique_ptr<NTupleNetwork> snapshot;  // self対戦時の前回スナップショット
+    std::shared_ptr<const NTupleNetwork> snapshot; // 変更: 共有参照（毎回コピーしない）
     mutable std::mutex mutex_;  // スナップショット更新用のmutex
-    
+
     OpponentState(const std::string& t) : type(t), snapshot(nullptr) {}
-    
+
     void update_snapshot(const NTupleNetwork& network) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!snapshot) {
-            snapshot = std::make_unique<NTupleNetwork>(network);
-        } else {
-            *snapshot = network;
-        }
+        // ここは「更新時だけ」コピー。play側ではコピーしない。
+        snapshot = std::make_shared<NTupleNetwork>(network);
     }
-    
-    NTupleNetwork get_snapshot() const {
+
+    std::shared_ptr<const NTupleNetwork> get_snapshot_ptr() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (snapshot) {
-            return *snapshot;
-        }
-        return NTupleNetwork(); // デフォルト（通常は呼ばれない）
+        return snapshot;
     }
 };
 
@@ -159,8 +155,8 @@ public:
 class SharedNTupleNetwork {
 private:
     NTupleNetwork network_;
-    mutable std::mutex mutex_;  // mutable allows locking in const methods
-    
+    mutable std::mutex mutex_;
+
 public:
     SharedNTupleNetwork() = default;
     
@@ -200,6 +196,13 @@ public:
         return network_.num_weights();
     }
     
+    // 追加: 重みをコピーせず、タプル定義だけをコピーして返す（パターン表示用）
+    std::vector<NTuple> get_tuples_copy() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto& tuples = network_.get_tuples();
+        return std::vector<NTuple>(tuples.begin(), tuples.end());
+    }
+
     // ネットワークのコピーを取得（スナップショット用）
     NTupleNetwork get_network() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -314,20 +317,20 @@ GameResult play_training_game(
     GameResult result;
     GameState state;
     state.reset();
-    
-    // 対戦相手のネットワークまたはポリシーを準備
-    std::unique_ptr<NTupleNetwork> opponent_network;  // ポインタに変更
+
+    // 変更: self相手は shared_ptr で参照（毎ゲームの丸ごとコピーをやめる）
+    std::shared_ptr<const NTupleNetwork> opponent_network;
     std::unique_ptr<GreedyPolicy> greedy_policy;
     std::unique_ptr<RuleBasedPolicy> rulebased_policy;
-    
+
     if (opponent_state.type == "self") {
-        opponent_network = std::make_unique<NTupleNetwork>(opponent_state.get_snapshot());
+        opponent_network = opponent_state.get_snapshot_ptr();
     } else if (opponent_state.type == "greedy") {
         greedy_policy = std::make_unique<GreedyPolicy>();
     } else if (opponent_state.type == "rulebased") {
         rulebased_policy = std::make_unique<RuleBasedPolicy>();
     }
-    
+
     const int MAX_MOVES = 500;
     int move_count = 0;
     
@@ -367,8 +370,13 @@ GameResult play_training_game(
         } else {
             // 対戦相手（White）: タイプに応じた戦略
             if (opponent_state.type == "self") {
-                // 前回のネットワーク（greedy）
-                move = select_move_epsilon_greedy(state, *opponent_network, 0.0f, rng);
+                // 前回スナップショットでgreedy（コピーなし）
+                if (opponent_network) {
+                    move = select_move_epsilon_greedy(state, *opponent_network, 0.0f, rng);
+                } else {
+                    // 念のため（通常は初期スナップショットが入っている想定）
+                    move = select_move_epsilon_greedy(state, network, 0.0f, rng);
+                }
             } else if (opponent_state.type == "greedy") {
                 move = greedy_policy->pick(state);
             } else if (opponent_state.type == "rulebased") {
@@ -631,7 +639,7 @@ void train_network_parallel(const TrainingConfig& config) {
     
     // Self対戦の場合、初期スナップショットを作成
     if (config.opponent == "self") {
-        opponent_state.update_snapshot(network.get_network());
+        opponent_state.update_snapshot(network.get_network()); // 更新時のコピーはOK（頻度低）
     }
     
     // Automatically set save_interval
@@ -664,10 +672,10 @@ void train_network_parallel(const TrainingConfig& config) {
     
     // パターンを視覚的に表示
     std::cout << "N-tuple Patterns:\n";
-    NTupleNetwork temp_network = network.get_network();
-    const auto& tuples = temp_network.get_tuples();
+    // 変更: ネットワーク全コピーをやめて、タプル定義だけコピーして表示
+    const auto tuples = network.get_tuples_copy();
     for (size_t i = 0; i < tuples.size(); ++i) {
-        print_ntuple_pattern(tuples[i], i + 1);
+        print_ntuple_pattern(tuples[i], static_cast<int>(i + 1));
     }
     std::cout << "\n";
     
