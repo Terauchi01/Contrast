@@ -42,6 +42,22 @@ target_include_directories(train_parallel
     ${CMAKE_SOURCE_DIR}/engine/include
 )
 
+# Parallel training program (big patterns)
+add_executable(train_parallel_big train_parallel_big.cpp)
+
+target_link_libraries(train_parallel_big
+  PRIVATE
+    contrast_core
+    contrast_engine_big
+)
+
+target_include_directories(train_parallel
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/core/include
+    ${CMAKE_SOURCE_DIR}/engine/include
+)
+
+
 # Self-play training program
 add_executable(train_selfplay train_selfplay.cpp)
 
