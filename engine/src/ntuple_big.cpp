@@ -180,6 +180,32 @@ long long NTuple::num_states() const {
 // ============================================================================
 
 /**
+ * NTupleNetworkのデストラクタ
+ * 
+ * メモリ解放を追跡
+ */
+NTupleNetwork::~NTupleNetwork() {
+  // Calculate memory being freed
+  size_t total_weights = 0;
+  for (const auto& w : weights_) {
+    total_weights += w.size();
+  }
+  total_weights += hand_weights_.size();
+  
+#ifdef SEPARATE_ENCODING
+  for (const auto& w : tile_weights_) {
+    total_weights += w.size();
+  }
+#endif
+  
+  double memory_mb = (total_weights * sizeof(float)) / (1024.0 * 1024.0);
+  double memory_gb = (total_weights * sizeof(float)) / (1024.0 * 1024.0 * 1024.0);
+  
+  std::cout << "[Memory] ✗ Deallocating NTupleNetwork: " << memory_mb << " MB (" 
+            << memory_gb << " GB)\n";
+}
+
+/**
  * 手持ちタイルからインデックスを計算
  * 
  * 手持ちの状態をエンコード（合計8状態）
@@ -214,6 +240,8 @@ int NTupleNetwork::hand_index(int black_remain, int gray_remain) {
 NTupleNetwork::NTupleNetwork() {
   init_tuples();
   
+  std::cout << "[Memory] Allocating NTupleNetwork...\n";
+  
   // Initialize pattern weights to a small positive value
   weights_.resize(tuples_.size());
   const float initial_weight = 0.5f / (tuples_.size() + 1);  // +1 for hand table
@@ -231,6 +259,29 @@ NTupleNetwork::NTupleNetwork() {
     tile_weights_[i].resize(tile_tuples_[i].num_states(), initial_weight);
   }
 #endif
+  
+  // Display actual memory usage after allocation
+  size_t total_weights = 0;
+  for (const auto& w : weights_) {
+    total_weights += w.size();
+  }
+  total_weights += hand_weights_.size();
+  
+#ifdef SEPARATE_ENCODING
+  for (const auto& w : tile_weights_) {
+    total_weights += w.size();
+  }
+#endif
+  
+  double actual_memory_bytes = total_weights * sizeof(float);
+  double actual_memory_mb = actual_memory_bytes / (1024.0 * 1024.0);
+  double actual_memory_gb = actual_memory_bytes / (1024.0 * 1024.0 * 1024.0);
+  
+  std::cout << "[Memory] ✓ Allocated NTupleNetwork:\n";
+  std::cout << "  Total weights: " << total_weights << "\n";
+  std::cout << "  Memory: " << actual_memory_mb << " MB (" 
+            << actual_memory_gb << " GB)\n";
+  std::cout << "========================================\n\n";
 }
 
 // Copy constructor for fast in-memory copying
@@ -240,6 +291,24 @@ NTupleNetwork::NTupleNetwork(const NTupleNetwork& other)
   , tile_tuples_(other.tile_tuples_), tile_weights_(other.tile_weights_)
 #endif
 {
+  // Calculate copied memory
+  size_t total_weights = 0;
+  for (const auto& w : weights_) {
+    total_weights += w.size();
+  }
+  total_weights += hand_weights_.size();
+  
+#ifdef SEPARATE_ENCODING
+  for (const auto& w : tile_weights_) {
+    total_weights += w.size();
+  }
+#endif
+  
+  double memory_mb = (total_weights * sizeof(float)) / (1024.0 * 1024.0);
+  double memory_gb = (total_weights * sizeof(float)) / (1024.0 * 1024.0 * 1024.0);
+  
+  std::cout << "[Memory] ✓ Copied NTupleNetwork: " << memory_mb << " MB (" 
+            << memory_gb << " GB)\n";
 }
 
 /**

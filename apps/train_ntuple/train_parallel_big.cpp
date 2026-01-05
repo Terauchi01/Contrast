@@ -370,11 +370,11 @@ GameResult play_training_game(
         } else {
             // 対戦相手（White）: タイプに応じた戦略
             if (opponent_state.type == "self") {
-                // 前回スナップショットでgreedy（コピーなし）
+                // スナップショットがあれば使用、なければメインネットワークを使用
                 if (opponent_network) {
                     move = select_move_epsilon_greedy(state, *opponent_network, 0.0f, rng);
                 } else {
-                    // 念のため（通常は初期スナップショットが入っている想定）
+                    // スナップショットなし：メインネットワークを使用（同じネットワーク参照）
                     move = select_move_epsilon_greedy(state, network, 0.0f, rng);
                 }
             } else if (opponent_state.type == "greedy") {
@@ -417,6 +417,11 @@ void worker_thread(
         int game_num = games_completed.fetch_add(1);
         if (game_num >= target_games) {
             break;
+        }
+        
+        // Log first game start
+        if (game_num == 0) {
+            std::cout << "[Worker " << worker_id << "] >>> Starting GAME #1 <<<\n";
         }
         
         auto game_start = std::chrono::steady_clock::now();
@@ -520,10 +525,11 @@ void updater_thread(
         turns_processed.fetch_add(num_updates);
         
         // Self対戦の場合、定期的に対戦相手のネットワークを更新
-        if (config.opponent == "self" && current_game - last_snapshot_game >= 100) {
-            opponent_state.update_snapshot(network.get_network());
-            last_snapshot_game = current_game;
-        }
+        // メモリ削減のため無効化：同じネットワークを参照
+        // if (config.opponent == "self" && current_game - last_snapshot_game >= 100) {
+        //     opponent_state.update_snapshot(network.get_network());
+        //     last_snapshot_game = current_game;
+        // }
         
         // ターン数での学習停止チェック
         if (config.num_turns > 0 && turns_processed.load() >= config.num_turns) {
@@ -595,10 +601,11 @@ void updater_thread(
             std::cout << "[Updater] Saved checkpoint: " << checkpoint_path << "\n";
             
             // Self対戦の場合、チェックポイント保存時にも対戦相手を更新
-            if (config.opponent == "self") {
-                opponent_state.update_snapshot(network.get_network());
-                last_snapshot_game = current_game;
-            }
+            // メモリ削減のため無効化：同じネットワークを参照
+            // if (config.opponent == "self") {
+            //     opponent_state.update_snapshot(network.get_network());
+            //     last_snapshot_game = current_game;
+            // }
         }
     }
     
@@ -638,9 +645,11 @@ void train_network_parallel(const TrainingConfig& config) {
     }
     
     // Self対戦の場合、初期スナップショットを作成
-    if (config.opponent == "self") {
-        opponent_state.update_snapshot(network.get_network()); // 更新時のコピーはOK（頻度低）
-    }
+    // メモリ削減のため無効化：同じネットワークを参照
+    // if (config.opponent == "self") {
+    //     opponent_state.update_snapshot(network.get_network());
+    // }
+    std::cout << "[Config] Self-play mode: Using same network (no snapshot copy)\n";
     
     // Automatically set save_interval
     int actual_save_interval = config.save_interval;

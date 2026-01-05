@@ -14,6 +14,7 @@ add_subdirectory(eval_ntuple)
 add_subdirectory(test_rule_based)
 add_subdirectory(test_rulebased)
 add_subdirectory(debug_rulebased)
+add_subdirectory(test_mcts)
 
 # add_subdirectory(web_server)  # Temporarily disabled
 

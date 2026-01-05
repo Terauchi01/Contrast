@@ -20,6 +20,7 @@ add_library(contrast_engine_big
   src/rule_based_policy.cpp
   src/rule_based_policy2.cpp
   src/mcts.cpp
+  src/alphabeta.cpp
   src/ntuple_big.cpp
 )
 

@@ -13,6 +13,31 @@
 using namespace contrast;
 using namespace contrast_ai;
 
+// Simple board printing for debugging
+void print_board(const GameState& state) {
+  const Board& b = state.board();
+  int w = b.width();
+  int h = b.height();
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      const Cell& c = b.at(x,y);
+      char ch = '.';
+      if (c.occupant == Player::Black) ch = 'B';
+      else if (c.occupant == Player::White) ch = 'W';
+      else ch = '.';
+      std::cout << ch;
+      if (c.tile != TileType::None) {
+        // simple marker for tile presence
+        std::cout << static_cast<int>(c.tile);
+      } else {
+        std::cout << ' ';
+      }
+      if (x < w-1) std::cout << " ";
+    }
+    std::cout << "\n";
+  }
+}
+
 struct EvalStats {
   int black_wins = 0;
   int white_wins = 0;
@@ -56,7 +81,7 @@ struct EvalStats {
 Player play_game(NTuplePolicy& ntuple_policy, NTuplePolicy* opponent_ntuple, 
                  GreedyPolicy* opponent_greedy, RandomPolicy* opponent_random,
                  RuleBasedPolicy* opponent_rulebased,
-                 int& moves, bool swap_colors = false) {
+                 int& moves, bool swap_colors = false, bool verbose = false) {
   GameState state;
   moves = 0;
   const int MAX_MOVES = 1000;
@@ -96,7 +121,24 @@ Player play_game(NTuplePolicy& ntuple_policy, NTuplePolicy* opponent_ntuple,
       }
     }
     
+    if (verbose) {
+      // Print simple move representation: player and coordinates
+      Player p = state.current_player();
+      std::cout << "Move " << (moves + 1) << ": " << (p == Player::Black ? "Black" : "White")
+                << " -> sx=" << move.sx << ",sy=" << move.sy
+                << ",dx=" << move.dx << ",dy=" << move.dy;
+      if (move.place_tile) {
+        std::cout << ", place tile at (" << move.tx << "," << move.ty << ") type=" << static_cast<int>(move.tile);
+      }
+      std::cout << "\n";
+    }
+
     state.apply_move(move);
+
+    if (verbose) {
+      print_board(state);
+      std::cout << "---\n";
+    }
     moves++;
   }
   
@@ -198,8 +240,8 @@ int main(int argc, char** argv) {
       std::cout << "Playing game " << (i + 1) << "/" << num_games << "...\r" << std::flush;
     }
     
-    int moves;
-    Player winner = play_game(ntuple_policy, opponent_ntuple, opponent_greedy, opponent_random, opponent_rulebased, moves, swap_colors);
+  int moves;
+  Player winner = play_game(ntuple_policy, opponent_ntuple, opponent_greedy, opponent_random, opponent_rulebased, moves, swap_colors, verbose);
     stats.record_game(winner, moves);
     
     // Track NTuple-specific wins

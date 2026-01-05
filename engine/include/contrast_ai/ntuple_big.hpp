@@ -96,6 +96,9 @@ public:
   // Copy constructor for fast in-memory copying
   NTupleNetwork(const NTupleNetwork& other);
   
+  // Destructor to track memory deallocation
+  ~NTupleNetwork();
+  
   // 盤面を評価（現在のプレイヤー視点）
   // 正の値=現在のプレイヤーに有利、負の値=不利
   float evaluate(const contrast::GameState& state) const;
