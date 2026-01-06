@@ -237,26 +237,25 @@ int NTupleNetwork::hand_index(int black_remain, int gray_remain) {
  *   weights_[i][j] = i番目のパターンのj番目の状態に対する評価値
  *   hand_weights_[k] = 手持ち状態kの評価値
  */
-NTupleNetwork::NTupleNetwork() {
-  init_tuples();
+NTupleNetwork::NTupleNetwork(int num_patterns) {
+  init_tuples(num_patterns);
   
   std::cout << "[Memory] Allocating NTupleNetwork...\n";
   
-  // Initialize pattern weights to a small positive value
+  // Initialize pattern weights to zero (unbiased start)
   weights_.resize(tuples_.size());
-  const float initial_weight = 0.5f / (tuples_.size() + 1);  // +1 for hand table
   for (size_t i = 0; i < tuples_.size(); ++i) {
-    weights_[i].resize(tuples_[i].num_states(), initial_weight);
+    weights_[i].resize(tuples_[i].num_states(), 0.0f);
   }
   
   // Initialize hand weights (8 states: 4x2 for black_remain x gray_remain)
-  hand_weights_.resize(8, initial_weight);
+  hand_weights_.resize(8, 0.0f);
   
 #ifdef SEPARATE_ENCODING
   // Initialize tile pattern weights (for separate encoding)
   tile_weights_.resize(tile_tuples_.size());
   for (size_t i = 0; i < tile_tuples_.size(); ++i) {
-    tile_weights_[i].resize(tile_tuples_[i].num_states(), initial_weight);
+    tile_weights_[i].resize(tile_tuples_[i].num_states(), 0.0f);
   }
 #endif
   
@@ -333,8 +332,10 @@ NTupleNetwork::NTupleNetwork(const NTupleNetwork& other)
  * メモリ使用量：
  *   - 各パターン: 9^9 = 387,420,489 状態 → 約1.44GB
  *   - 合計パターン数に応じて線形増加
+ * 
+ * @param num_patterns 使用するパターン数（指定なし=-1で全て使用）
  */
-void NTupleNetwork::init_tuples() {
+void NTupleNetwork::init_tuples(int num_patterns) {
   // 盤面パターン（駒の配置 or 駒×タイル）
   std::vector<std::vector<int>> base_patterns = {
     /*
@@ -345,16 +346,32 @@ void NTupleNetwork::init_tuples() {
     20,21,22,23,24,
     */
 
-    // 6つ空き
-    {3,4,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24}, // 下一行空き
-    {2,3,4,7,8,9,12,13,14,15,16,17,18,19,20,21,22,23,24}, 
-    {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,18,19,23,24}, 
-    {0,1,2,3,4,5,6,7,8,9,12,13,14,17,18,19,22,23,24}, 
+    // // 6つ空き
+    // {3,4,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24}, // 下一行空き
+    // {2,3,4,7,8,9,12,13,14,15,16,17,18,19,20,21,22,23,24}, 
+    // {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,18,19,23,24}, 
+    // {0,1,2,3,4,5,6,7,8,9,12,13,14,17,18,19,22,23,24}, 
 
-    //6つ空き
-    {0,1,2,3,4,5,6,7,8,9,11,12,13,14,17,18,19,23,24}, //下三角空き
-    {3,4,7,8,9,11,12,13,14,15,16,17,18,19,20,21,22,23,24}, //上三角空き
+    // //6つ空き
+    // {0,1,2,3,4,5,6,7,8,9,11,12,13,14,17,18,19,23,24}, //下三角空き
+    // {3,4,7,8,9,11,12,13,14,15,16,17,18,19,20,21,22,23,24}, //上三角空き
+
+    // {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24},//テンプレ
+    {1,6,12,18,24},//斜め
+    {0,1,2,5,10,15,20},               // 3x3正方形
+    {0,1,2,5,6,10,15},                // L字型
+    {1,5,6,7,10,15,16},               // T字型
+    {0,6,12,7,13,18,24},              // 斜め（\）
+    {2,8,14,7,13,18,24},              // 斜め（/）
+    {1,5,6,7,11,16,21},               // 十字型（縦優先）
+    {0,5,10,11,12,13,14},             // 十字型（横優先）
+    {2,7,12,17,22},                   // 縦長
   };
+  
+  // パターン数を制限（指定された場合のみ）
+  if (num_patterns > 0 && num_patterns < static_cast<int>(base_patterns.size())) {
+    base_patterns.resize(num_patterns);
+  }
   
   // 基本パターンを追加（駒配置用）
   long long total_piece_states = 0;
@@ -522,11 +539,6 @@ float NTupleNetwork::evaluate(const contrast::GameState& state) const {
   int h_idx = hand_index(inv.black, inv.gray);
   value += hand_weights_[h_idx];
   
-  // Flip sign if evaluating from White's perspective
-  if (current_player == contrast::Player::White) {
-    value = -value;
-  }
-  
   return value;
 }
 
@@ -609,18 +621,9 @@ void NTupleNetwork::td_update(const contrast::GameState& state, float target, fl
   int h_idx = hand_index(inv.black, inv.gray);
   raw_value += hand_weights_[h_idx];
   
-  // Apply perspective for current player
+  // Current value is already in current player's perspective
   float current_value = raw_value;
-  if (current_player == contrast::Player::White) {
-    current_value = -current_value;
-  }
-  
   float error = target - current_value;
-  
-  // Convert error back to raw (Black's perspective) for weight update
-  if (current_player == contrast::Player::White) {
-    error = -error;
-  }
   
   // Normalize learning rate by number of components
   int num_components = tuples_.size() + 1;  // +1 for hand table
@@ -825,9 +828,8 @@ contrast::Move NTuplePolicy::pick(const contrast::GameState& s) {
     contrast::GameState next = s;
     next.apply_move(m);
     
-    // Evaluate from current player's perspective
-    // (network already handles perspective flip)
-    float value = -network_.evaluate(next); // Negamax: opponent's value = -our value
+    // Negamax: evaluate from opponent's perspective, negate to get our value
+    float value = -network_.evaluate(next);
     
     if (value > best_value) {
       best_value = value;

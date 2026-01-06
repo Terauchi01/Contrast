@@ -4,7 +4,7 @@
 #include "contrast_ai/random_policy.hpp"
 #include "contrast_ai/greedy_policy.hpp"
 #include "contrast_ai/rule_based_policy.hpp"
-#include "contrast_ai/ntuple.hpp"
+#include "contrast_ai/ntuple_big.hpp"
 #include <iostream>
 #include <memory>
 #include <string>

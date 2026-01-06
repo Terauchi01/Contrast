@@ -91,7 +91,7 @@ struct NTuple {
  */
 class NTupleNetwork {
 public:
-  NTupleNetwork();
+  NTupleNetwork(int num_patterns = -1);  // -1 = use all patterns
   
   // Copy constructor for fast in-memory copying
   NTupleNetwork(const NTupleNetwork& other);
@@ -132,7 +132,7 @@ private:
 #endif
   
   // パターンの初期化
-  void init_tuples();
+  void init_tuples(int num_patterns = -1);  // -1 = use all patterns
   
   // 手持ちからインデックスを計算 (0-7)
   static int hand_index(int black_remain, int gray_remain);
